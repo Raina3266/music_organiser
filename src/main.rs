@@ -1,87 +1,79 @@
-use std::{
-    env::{self},
-    fs::{DirEntry, copy},
-    path::{Path, PathBuf},
+use std::{env, process::ExitCode};
+
+use music_tag_transfer::{
+    cli::{Command, HELP, parse_args},
+    delete_tags_recursively, transfer_frame_recursively,
 };
 
-use id3::{Tag, TagLike, Version};
-
-// 4 args: program name, first
-fn main() {
-    let mut args = env::args().skip(1);
-    let path_to_first_folder = args.next().unwrap();
-    let path_to_second_folder = args.next().unwrap();
-    let metadata_key = args.next().unwrap();
-    for entries1 in std::fs::read_dir(&path_to_first_folder).unwrap() {
-        let entries1 = entries1.unwrap();
-        for entries2 in std::fs::read_dir(&path_to_second_folder).unwrap() {
-            let entries2 = entries2.unwrap();
-            let tem_dir = copy_to_tem_dir(&PathBuf::from(&path_to_second_folder), &entries2);
-            
-            let tag1 = Tag::read_from_path(PathBuf::from(&path_to_first_folder).join(entries1.file_name())).unwrap();
-            let mut tag2 = Tag::read_from_path(&tem_dir).unwrap();
-        
-            copy_tag(&tag1, &mut tag2, &metadata_key);
-            tag2.write_to_path(&tem_dir, Version::Id3v23).unwrap();
-            
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}\n\n{HELP}");
+            ExitCode::from(2)
         }
     }
 }
 
-fn copy_to_tem_dir(path: &PathBuf, entry: &DirEntry) -> PathBuf {
-    let original_file = PathBuf::from(path).join(entry.file_name());
-    let temp_file = std::env::temp_dir().join(entry.file_name());
-    copy(original_file, &temp_file).unwrap();
-    temp_file
-}
+fn run() -> Result<(), String> {
+    match parse_args(env::args_os().skip(1))? {
+        Command::Help => {
+            print!("{HELP}");
+            Ok(())
+        }
+        Command::Delete {
+            folder,
+            tags,
+            dry_run,
+        } => {
+            let report = delete_tags_recursively(&folder, &tags, dry_run)
+                .map_err(|error| error.to_string())?;
 
-fn copy_tag(tag1: &Tag, tag2: &mut Tag, key: &str) {
-    if tag1.title() == tag2.title() {
-        let lyric_frame = tag1
-            .frames()
-            .find(|f| f.id() == key)
-            .map(|f| f.clone())
-            .unwrap();
-        tag2.add_frame(lyric_frame);
-    }
-}
+            let verb = if dry_run { "Would update" } else { "Updated" };
+            println!(
+                "{verb} {} file(s); removed {} frame(s). Scanned {} music file(s), \
+                 skipped {} unchanged and {} without an ID3 tag.",
+                report.files_changed,
+                report.frames_removed,
+                report.files_scanned,
+                report.files_unchanged,
+                report.files_without_tag,
+            );
 
-fn lyric_tag_exists(tag: &Tag, metadata: &str) -> bool {
-    tag.frames().any(|f| f.id() == metadata)
-}
+            if report.errors.is_empty() {
+                Ok(())
+            } else {
+                for error in &report.errors {
+                    eprintln!("{}: {}", error.path.display(), error.message);
+                }
+                Err(format!(
+                    "{} file(s) could not be processed",
+                    report.errors.len()
+                ))
+            }
+        }
+        Command::Transfer {
+            source,
+            destination,
+            frame_id,
+        } => {
+            let report = transfer_frame_recursively(&source, &destination, &frame_id)
+                .map_err(|error| error.to_string())?;
+            println!(
+                "Updated {} file(s); copied {} frame(s). Scanned {} destination music file(s).",
+                report.files_changed, report.frames_copied, report.destination_files_scanned
+            );
 
-fn lyric_tag_equal(tag1: Tag, tag2: Tag) -> bool {
-    tag1.lyrics().eq(tag2.lyrics())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::str::FromStr;
-
-    use super::*;
-
-    #[test]
-    fn test_copy_tag() {
-        let example1 =
-            PathBuf::from_str("/home/raina/Projects/music-tag-transfer/test_files/with_lyrics")
-                .unwrap();
-        let example2 =
-            PathBuf::from_str("/home/raina/Projects/music-tag-transfer/test_files/without_lyrics")
-                .unwrap();
-        for entries1 in std::fs::read_dir(&example1).unwrap() {
-            let entries1 = entries1.unwrap();
-            for entries2 in std::fs::read_dir(&example2).unwrap() {
-                let entries2 = entries2.unwrap();
-                let tem_dir = copy_to_tem_dir(&PathBuf::from(&example2), &entries2);
-                
-                let tag1 = Tag::read_from_path(PathBuf::from(&example1).join(entries1.file_name())).unwrap();
-                let mut tag2 = Tag::read_from_path(&tem_dir).unwrap();
-                
-                assert!(!lyric_tag_exists(&tag2, "Lyrics"));
-                copy_tag(&tag1, &mut tag2, "Lyrics");
-                assert!(lyric_tag_exists(&tag2, "Lyrics"));
-
-                tag2.write_to_path(&tem_dir, Version::Id3v23).unwrap();
+            if report.errors.is_empty() {
+                Ok(())
+            } else {
+                for error in &report.errors {
+                    eprintln!("{}: {}", error.path.display(), error.message);
+                }
+                Err(format!(
+                    "{} file(s) could not be processed",
+                    report.errors.len()
+                ))
             }
         }
     }
