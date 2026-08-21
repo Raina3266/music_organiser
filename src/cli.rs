@@ -95,7 +95,9 @@ fn parse_transfer(args: &[OsString]) -> Result<Command, String> {
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
-        return Err("frame ID must be four uppercase ASCII letters/digits, such as USLT".to_owned());
+        return Err(
+            "frame ID must be four uppercase ASCII letters/digits, such as USLT".to_owned(),
+        );
     }
 
     Ok(Command::Transfer {
@@ -160,8 +162,14 @@ mod tests {
             Command::Delete {
                 folder: PathBuf::from("/music"),
                 tags: vec![
-                    TagSpec { name: "Encoded-by", frame_id: "TENC" },
-                    TagSpec { name: "Album Artist", frame_id: "TPE2" },
+                    TagSpec {
+                        name: "Encoded-by",
+                        frame_id: "TENC"
+                    },
+                    TagSpec {
+                        name: "Album Artist",
+                        frame_id: "TPE2"
+                    },
                 ],
                 dry_run: true,
             }
@@ -178,7 +186,10 @@ mod tests {
     fn de_duplicates_frame_ids() {
         assert_eq!(
             parse_tag_list("[Encoded-by, Encoded-by]").unwrap(),
-            vec![TagSpec { name: "Encoded-by", frame_id: "TENC" }]
+            vec![TagSpec {
+                name: "Encoded-by",
+                frame_id: "TENC"
+            }]
         );
     }
 

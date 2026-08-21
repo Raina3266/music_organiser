@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    error::Error,
-    fmt,
-    path::Path,
-};
+use std::{collections::HashMap, error::Error, fmt, path::Path};
 
 use id3::{ErrorKind, Frame, Tag, TagLike, Version};
 
@@ -36,10 +31,9 @@ pub fn transfer_frame_recursively(
     destination_folder: &Path,
     frame_id: &str,
 ) -> Result<TransferReport, TransferError> {
-    let source_files =
-        music_files_recursively(source_folder).map_err(|error| TransferError {
-            message: format!("cannot scan {}: {error}", source_folder.display()),
-        })?;
+    let source_files = music_files_recursively(source_folder).map_err(|error| TransferError {
+        message: format!("cannot scan {}: {error}", source_folder.display()),
+    })?;
     let destination_files =
         music_files_recursively(destination_folder).map_err(|error| TransferError {
             message: format!("cannot scan {}: {error}", destination_folder.display()),

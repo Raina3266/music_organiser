@@ -83,14 +83,12 @@ pub fn delete_tags_recursively(
             continue;
         }
 
-        if !dry_run {
-            if let Err(error) = write_tag_safely(&path, &tag) {
-                report.errors.push(FileError {
-                    path,
-                    message: error.to_string(),
-                });
-                continue;
-            }
+        if !dry_run && let Err(error) = write_tag_safely(&path, &tag) {
+            report.errors.push(FileError {
+                path,
+                message: error.to_string(),
+            });
+            continue;
         }
 
         report.files_changed += 1;
@@ -172,8 +170,14 @@ mod tests {
 
     fn requested_tags() -> Vec<TagSpec> {
         vec![
-            TagSpec { name: "Encoded-by", frame_id: "TENC" },
-            TagSpec { name: "Album Artist", frame_id: "TPE2" },
+            TagSpec {
+                name: "Encoded-by",
+                frame_id: "TENC",
+            },
+            TagSpec {
+                name: "Album Artist",
+                frame_id: "TPE2",
+            },
         ]
     }
 
@@ -192,8 +196,7 @@ mod tests {
         fs::write(directory.0.join("no-tag.mp3"), b"audio payload").unwrap();
         fs::write(directory.0.join("cover.jpg"), b"not music").unwrap();
 
-        let report =
-            delete_tags_recursively(&directory.0, &requested_tags(), false).unwrap();
+        let report = delete_tags_recursively(&directory.0, &requested_tags(), false).unwrap();
 
         assert_eq!(report.files_scanned, 3);
         assert_eq!(report.files_changed, 1);
@@ -218,8 +221,7 @@ mod tests {
         let path = directory.0.join("song.mp3");
         tagged_file(&path, &[("TENC", "Encoder")]);
 
-        let report =
-            delete_tags_recursively(&directory.0, &requested_tags(), true).unwrap();
+        let report = delete_tags_recursively(&directory.0, &requested_tags(), true).unwrap();
 
         assert_eq!(report.files_changed, 1);
         assert_eq!(report.frames_removed, 1);
