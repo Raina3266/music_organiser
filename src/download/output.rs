@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const FAILED_URLS_FILENAME: &str = "output.txt";
+const FAILED_URLS_FILENAME: &str = "output.txt";
 
-pub fn write_failed_urls<'a, I>(output_dir: &Path, urls: I) -> Result<PathBuf, String>
+pub(super) fn write_failed_urls<'a, I>(output_dir: &Path, urls: I) -> Result<PathBuf, String>
 where
     I: IntoIterator<Item = &'a str>,
 {
@@ -14,7 +14,7 @@ where
     Ok(path)
 }
 
-pub fn format_failed_urls<'a, I>(urls: I) -> String
+fn format_failed_urls<'a, I>(urls: I) -> String
 where
     I: IntoIterator<Item = &'a str>,
 {

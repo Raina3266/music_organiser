@@ -1,6 +1,7 @@
 use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
+    FileError,
     cli::{Command, HELP, parse_args},
     delete_tags_recursively, download, resolve, transfer_frame_recursively,
 };
@@ -79,17 +80,7 @@ fn run() -> Result<ExitCode, String> {
                 report.files_without_tag,
             );
 
-            if report.errors.is_empty() {
-                Ok(ExitCode::SUCCESS)
-            } else {
-                for error in &report.errors {
-                    eprintln!("{}: {}", error.path.display(), error.message);
-                }
-                Err(format!(
-                    "{} file(s) could not be processed",
-                    report.errors.len()
-                ))
-            }
+            finish_with_file_errors(&report.errors)
         }
         Command::Transfer {
             source,
@@ -99,21 +90,25 @@ fn run() -> Result<ExitCode, String> {
             let report = transfer_frame_recursively(&source, &destination, &frame_id)
                 .map_err(|error| error.to_string())?;
             println!(
-                "Updated {} file(s); copied {} frame(s). Scanned {} destination music file(s).",
-                report.files_changed, report.frames_copied, report.destination_files_scanned
+                "Updated {} file(s); copied {} frame(s). Scanned {} source and {} destination music file(s).",
+                report.files_changed,
+                report.frames_copied,
+                report.source_files_scanned,
+                report.destination_files_scanned
             );
 
-            if report.errors.is_empty() {
-                Ok(ExitCode::SUCCESS)
-            } else {
-                for error in &report.errors {
-                    eprintln!("{}: {}", error.path.display(), error.message);
-                }
-                Err(format!(
-                    "{} file(s) could not be processed",
-                    report.errors.len()
-                ))
-            }
+            finish_with_file_errors(&report.errors)
         }
     }
+}
+
+fn finish_with_file_errors(errors: &[FileError]) -> Result<ExitCode, String> {
+    if errors.is_empty() {
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for error in errors {
+        eprintln!("{}: {}", error.path.display(), error.message);
+    }
+    Err(format!("{} file(s) could not be processed", errors.len()))
 }

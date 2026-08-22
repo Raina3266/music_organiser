@@ -2,13 +2,13 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-pub fn read_token_file(path: &Path) -> Result<String, String> {
+pub(super) fn read_token_file(path: &Path) -> Result<String, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("cannot read token file {}: {error}", path.display()))?;
     clean_token(&contents)
 }
 
-pub fn clean_token(raw: &str) -> Result<String, String> {
+pub(super) fn clean_token(raw: &str) -> Result<String, String> {
     let mut value = raw.trim();
     if value.is_empty() {
         return Err("the token is empty".into());
@@ -64,7 +64,7 @@ fn extract_assignment_value(raw: &str) -> Option<&str> {
     Some(&after_quote[..end])
 }
 
-pub fn prompt_for_token(reason: &str) -> Result<Option<String>, String> {
+pub(super) fn prompt_for_token(reason: &str) -> Result<Option<String>, String> {
     eprintln!();
     if !reason.is_empty() {
         eprintln!("{reason}");

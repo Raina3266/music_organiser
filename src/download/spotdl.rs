@@ -5,23 +5,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-pub const OUTPUT_TEMPLATE: &str = "{artists} - {title} [{track-id}].{output-ext}";
+const OUTPUT_TEMPLATE: &str = "{artists} - {title} [{track-id}].{output-ext}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessResult {
-    pub success: bool,
-    pub code: Option<i32>,
-    pub output: String,
+pub(super) struct ProcessResult {
+    pub(super) success: bool,
+    pub(super) code: Option<i32>,
+    pub(super) output: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OfficialConfigRisk {
-    pub path: PathBuf,
-    pub settings: Vec<&'static str>,
+pub(super) struct OfficialConfigRisk {
+    pub(super) path: PathBuf,
+    pub(super) settings: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Classification {
+pub(super) enum Classification {
     Success,
     PremiumRequired,
     Authentication,
@@ -35,7 +35,7 @@ pub enum Classification {
     Failed,
 }
 
-pub fn verify(program: &str) -> Result<String, String> {
+pub(super) fn verify(program: &str) -> Result<String, String> {
     let result = Command::new(resolve_program(program))
         .arg("--version")
         .stdout(Stdio::piped())
@@ -70,7 +70,7 @@ fn resolve_program(program: &str) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub fn official_config_risk() -> Result<Option<OfficialConfigRisk>, String> {
+pub(super) fn official_config_risk() -> Result<Option<OfficialConfigRisk>, String> {
     let Some(path) = spotdl_config_paths()
         .into_iter()
         .find(|candidate| candidate.is_file())
@@ -136,7 +136,7 @@ fn json_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
     Some(after_colon.trim_start())
 }
 
-pub fn download(
+pub(super) fn download(
     program: &str,
     output_dir: &Path,
     url: &str,
@@ -175,7 +175,7 @@ fn download_command(
     command
 }
 
-pub fn download_deno(program: &str) -> Result<ProcessResult, String> {
+pub(super) fn download_deno(program: &str) -> Result<ProcessResult, String> {
     let mut command = Command::new(resolve_program(program));
     command.arg("--download-deno");
     run_relayed(&mut command, program)
@@ -263,7 +263,7 @@ fn join_relay(
         .map_err(|_| format!("spotDL {stream} relay thread panicked"))?
 }
 
-pub fn classify(result: &ProcessResult) -> Classification {
+pub(super) fn classify(result: &ProcessResult) -> Classification {
     let text = result.output.to_ascii_lowercase();
     let has_success_marker = text.contains("downloaded \"")
         || (text.contains("skipping ")
@@ -387,7 +387,7 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
-pub fn parse_retry_after(text: &str) -> Option<u64> {
+fn parse_retry_after(text: &str) -> Option<u64> {
     let lower = text.to_ascii_lowercase();
     for marker in ["retry-after", "retry after", "retry will occur after"] {
         if let Some(position) = lower.find(marker) {
@@ -405,7 +405,7 @@ pub fn parse_retry_after(text: &str) -> Option<u64> {
     None
 }
 
-pub fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
+pub(super) fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
     for word in text.split_whitespace() {
         let candidate =
             word.trim_matches(|character: char| !character.is_ascii_digit() && character != '.');
