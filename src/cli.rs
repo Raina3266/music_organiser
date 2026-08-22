@@ -2,6 +2,7 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
+use crate::resolve;
 
 pub const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -13,6 +14,9 @@ USAGE:
     " download [OPTIONS] <INPUT_FILE>
     ",
     env!("CARGO_PKG_NAME"),
+    " resolve <INPUT_FILE> <OUTPUT_FILE>
+    ",
+    env!("CARGO_PKG_NAME"),
     " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
     ",
     env!("CARGO_PKG_NAME"),
@@ -22,11 +26,15 @@ USAGE:
     " <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
 
 COMMANDS:
+    resolve     Convert free-text track descriptions into Spotify URLs
     download    Download Spotify links from a text file through spotDL
     delete      Remove selected ID3 tags from a folder recursively
     transfer    Copy one ID3 frame between matching files recursively
 
 EXAMPLES:
+    ",
+    env!("CARGO_PKG_NAME"),
+    " resolve tracks.txt spotify-links.txt
     ",
     env!("CARGO_PKG_NAME"),
     " download spotify-links.txt --output ~/Documents/Music
@@ -40,7 +48,7 @@ Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.
 
 Run `",
     env!("CARGO_PKG_NAME"),
-    " download --help` for downloader options.
+    " <COMMAND> --help` for command-specific help.
 "
 );
 
@@ -48,6 +56,8 @@ Run `",
 pub enum Command {
     Download(download_cli::Config),
     DownloadHelp,
+    Resolve(resolve::Config),
+    ResolveHelp,
     Delete {
         folder: PathBuf,
         tags: Vec<TagSpec>,
@@ -75,11 +85,39 @@ where
         "-h" | "--help" | "help" => Ok(Command::Help),
         "-V" | "--version" => Ok(Command::Version),
         "download" => parse_download(&args[1..]),
+        "resolve" => parse_resolve(&args[1..]),
         "delete" => parse_delete(&args[1..]),
         "transfer" => parse_transfer(&args[1..]),
         _ if args.len() == 3 => parse_transfer(&args),
         _ => Err(format!("unknown command {command:?}")),
     }
+}
+
+fn parse_resolve(args: &[OsString]) -> Result<Command, String> {
+    if args.len() == 1 {
+        match args[0].to_str() {
+            Some("-h" | "--help") => return Ok(Command::ResolveHelp),
+            Some("-V" | "--version") => return Ok(Command::Version),
+            _ => {}
+        }
+    }
+    if args.len() != 2 {
+        return Err("resolve requires an input file and an output file".to_owned());
+    }
+    if let Some(option) = args
+        .iter()
+        .find(|argument| argument.to_string_lossy().starts_with('-'))
+    {
+        return Err(format!(
+            "unknown resolve option {:?}",
+            option.to_string_lossy()
+        ));
+    }
+
+    Ok(Command::Resolve(resolve::Config {
+        input: PathBuf::from(&args[0]),
+        output: PathBuf::from(&args[1]),
+    }))
 }
 
 fn parse_download(args: &[OsString]) -> Result<Command, String> {
@@ -278,6 +316,25 @@ mod tests {
         assert_eq!(
             parse_args(strings(&["download", "--help"])).unwrap(),
             Command::DownloadHelp
+        );
+    }
+
+    #[test]
+    fn parses_resolve_pipeline() {
+        assert_eq!(
+            parse_args(strings(&["resolve", "tracks.txt", "spotify-links.txt"])).unwrap(),
+            Command::Resolve(resolve::Config {
+                input: PathBuf::from("tracks.txt"),
+                output: PathBuf::from("spotify-links.txt"),
+            })
+        );
+    }
+
+    #[test]
+    fn delegates_resolve_help() {
+        assert_eq!(
+            parse_args(strings(&["resolve", "--help"])).unwrap(),
+            Command::ResolveHelp
         );
     }
 }

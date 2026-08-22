@@ -1,10 +1,11 @@
-//! Spotify bundle downloading and recursive ID3v2.3 metadata tools.
+//! Spotify lookup/download workflows and recursive ID3v2.3 metadata tools.
 
 pub mod cli;
 mod delete;
 pub mod download;
 mod files;
 mod frames;
+pub mod resolve;
 mod transfer;
 
 pub use delete::{DeleteReport, FileError, delete_tags_recursively};

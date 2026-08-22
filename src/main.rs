@@ -2,7 +2,7 @@ use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, download, transfer_frame_recursively,
+    delete_tags_recursively, download, resolve, transfer_frame_recursively,
 };
 
 fn main() -> ExitCode {
@@ -28,6 +28,10 @@ fn run() -> Result<ExitCode, String> {
             println!("{}", download::cli::help_text());
             Ok(ExitCode::SUCCESS)
         }
+        Command::ResolveHelp => {
+            print!("{}", resolve::HELP);
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Version => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             Ok(ExitCode::SUCCESS)
@@ -35,6 +39,22 @@ fn run() -> Result<ExitCode, String> {
         Command::Download(config) => {
             let code = download::run(config)?;
             Ok(if code == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        Command::Resolve(config) => {
+            let report = resolve::run(config)?;
+            println!(
+                "Resolved {} of {} line(s); {} not found and {} error(s). Wrote {}.",
+                report.resolved,
+                report.total,
+                report.not_found,
+                report.errors,
+                report.output.display()
+            );
+            Ok(if report.errors == 0 {
                 ExitCode::SUCCESS
             } else {
                 ExitCode::from(1)

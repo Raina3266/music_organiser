@@ -1,7 +1,8 @@
 # music-tag-transfer
 
-A Rust CLI that keeps three related music-library workflows in one executable:
+A Rust CLI that keeps four related music-library workflows in one executable:
 
+- resolve free-text track descriptions into Spotify URLs;
 - download a list of Spotify links through spotDL;
 - delete selected ID3 tags recursively;
 - transfer one ID3 frame between matching source and destination tracks.
@@ -12,6 +13,7 @@ Only download content you are permitted to keep.
 ## Requirements
 
 - a stable Rust toolchain;
+- Spotify app credentials for the `resolve` command;
 - spotDL 4.5.0 or newer for the `download` command;
 - FFmpeg, as required by spotDL;
 - Deno for YouTube downloads that require a JavaScript runtime.
@@ -24,6 +26,43 @@ cargo build --release
 
 The binary is `target/release/music-tag-transfer` on Linux/macOS and
 `target\release\music-tag-transfer.exe` on Windows.
+
+## Resolve track descriptions into Spotify URLs
+
+The `resolve` command is the first half of a direct lookup-to-download
+pipeline. Create a UTF-8 text file with one free-text track description per
+line:
+
+```text
+Queen - Bohemian Rhapsody
+Daft Punk Get Lucky
+Adele, 21, Rolling in the Deep
+```
+
+Create an app in the [Spotify Developer dashboard](https://developer.spotify.com/dashboard), then provide its client
+credentials through environment variables. Keep the secret out of command
+history and source control:
+
+```bash
+export SPOTIFY_CLIENT_ID='your-client-id'
+export SPOTIFY_CLIENT_SECRET='your-client-secret'
+cargo run -- resolve tracks.txt spotify-links.txt
+```
+
+Each description uses Spotify's track search and selects the first result.
+Empty lines remain empty, and input lines beginning with `#` are preserved as
+comments. Missing tracks and per-line request failures are written as
+`# NOT FOUND: ...` or `# ERROR (...): ...` comments. This keeps input and
+output line numbers aligned while making the result immediately compatible
+with `download`:
+
+```bash
+cargo run -- download spotify-links.txt
+```
+
+Requests pause briefly between tracks. HTTP 429 responses are retried up to
+five times, but a requested wait over five minutes is rejected instead of
+silently sleeping for a long period.
 
 ## Download a list of Spotify links
 
