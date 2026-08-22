@@ -16,8 +16,8 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let command = parse_args(env::args_os().skip(1))
-        .map_err(|message| format!("{message}\n\n{HELP}"))?;
+    let command =
+        parse_args(env::args_os().skip(1)).map_err(|message| format!("{message}\n\n{HELP}"))?;
 
     match command {
         Command::Help => {

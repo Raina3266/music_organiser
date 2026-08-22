@@ -391,10 +391,7 @@ fn write_failure_report(
     failures: &[Failure],
     stopped: Option<&(usize, String)>,
 ) -> Result<std::path::PathBuf, String> {
-    let path = output_dir.join(format!(
-        "{}-download-failures.txt",
-        env!("CARGO_PKG_NAME")
-    ));
+    let path = output_dir.join(format!("{}-download-failures.txt", env!("CARGO_PKG_NAME")));
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
