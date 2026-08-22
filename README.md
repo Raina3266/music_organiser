@@ -1,14 +1,13 @@
 # music-organiser
 
 `music-organiser` is a Rust command-line project for preparing and maintaining
-a local music library. One executable provides four related workflows:
+a local music library. One executable provides three related workflows:
 
 | Command | Purpose |
 |---|---|
 | `resolve` | Search Spotify for free-text track descriptions and write Spotify URLs |
 | `download` | Download a file of Spotify links through spotDL |
 | `delete` | Remove selected ID3 frames recursively |
-| `transfer` | Copy one ID3 frame between tracks with matching titles |
 
 The Cargo package and executable are currently named `music-tag-transfer`.
 Downloaded audio comes from spotDL's configured providers, not from Spotify.
@@ -23,7 +22,6 @@ Only download material you are permitted to keep.
 - [Resolve track descriptions](#resolve-track-descriptions)
 - [Download Spotify links](#download-spotify-links)
 - [Delete ID3 tags](#delete-id3-tags)
-- [Transfer an ID3 frame](#transfer-an-id3-frame)
 - [Exit status](#exit-status)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -38,7 +36,7 @@ The individual workflows have these additional requirements:
 | `resolve` | A Spotify developer app and its Client ID/Client Secret |
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
-| `delete` / `transfer` | Read/write access to the relevant music folders |
+| `delete` | Read/write access to the relevant music folder |
 
 Check the external programs before downloading:
 
@@ -131,8 +129,6 @@ command to the next without manual cleanup.
 music-tag-transfer download [OPTIONS] <INPUT_FILE>
 music-tag-transfer resolve <INPUT_FILE> <OUTPUT_FILE>
 music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
-music-tag-transfer transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
-music-tag-transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
 ```
 
 Global flags:
@@ -406,40 +402,6 @@ same scan and reports the expected counts without writing files.
 | `User URL` | `WXXX` |
 | `Year` | `TYER` |
 
-## Transfer an ID3 frame
-
-### Syntax
-
-```text
-music-tag-transfer transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
-```
-
-The original three-positional-argument form remains supported:
-
-```text
-music-tag-transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
-```
-
-Example—copy unsynchronised lyrics:
-
-```bash
-music-tag-transfer transfer "/library/with-lyrics" "/library/without-lyrics" USLT
-```
-
-`FRAME_ID` must contain exactly four uppercase ASCII letters or digits, such
-as `USLT`, `APIC`, or `TENC`.
-
-The command scans both folder trees using the same supported extensions and
-symlink rules as `delete`. Source frames are indexed by the source file's
-`TIT2` title, and destination files are matched by the exact same title.
-Files without an ID3 tag or title are skipped.
-
-If several source files have the same title and requested frame, the first
-path in sorted traversal order supplies the frame data. Matching frames are
-added to each destination tag and the result is written as ID3v2.3. The
-command does not rename, copy, or delete audio files, and it has no dry-run
-mode.
-
 ## Exit status
 
 | Status | Meaning |
@@ -484,7 +446,7 @@ processed.
 
 ## Using the Rust library
 
-The package also exposes the recursive metadata operations:
+The package also exposes the recursive metadata deletion operation:
 
 ```rust
 use std::path::Path;
@@ -507,10 +469,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`transfer_frame_recursively`, `TransferReport`, `DeleteReport`,
-`FileError`, and `TagSpec` are also exported. The `cli`, `download`,
-and `resolve` modules expose the executable's command configuration and
-entry points.
+`DeleteReport`, `FileError`, and `TagSpec` are also exported. The `cli`,
+`download`, and `resolve` modules expose the executable's command
+configuration and entry points.
 
 ## Development
 
