@@ -2,24 +2,43 @@ use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, transfer_frame_recursively,
+    delete_tags_recursively, download, transfer_frame_recursively,
 };
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(exit_code) => exit_code,
         Err(message) => {
-            eprintln!("error: {message}\n\n{HELP}");
-            ExitCode::from(2)
+            eprintln!("error: {message}");
+            ExitCode::from(1)
         }
     }
 }
 
-fn run() -> Result<(), String> {
-    match parse_args(env::args_os().skip(1))? {
+fn run() -> Result<ExitCode, String> {
+    let command = parse_args(env::args_os().skip(1))
+        .map_err(|message| format!("{message}\n\n{HELP}"))?;
+
+    match command {
         Command::Help => {
             print!("{HELP}");
-            Ok(())
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::DownloadHelp => {
+            println!("{}", download::cli::help_text());
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Version => {
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Download(config) => {
+            let code = download::run(config)?;
+            Ok(if code == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
         }
         Command::Delete {
             folder,
@@ -41,7 +60,7 @@ fn run() -> Result<(), String> {
             );
 
             if report.errors.is_empty() {
-                Ok(())
+                Ok(ExitCode::SUCCESS)
             } else {
                 for error in &report.errors {
                     eprintln!("{}: {}", error.path.display(), error.message);
@@ -65,7 +84,7 @@ fn run() -> Result<(), String> {
             );
 
             if report.errors.is_empty() {
-                Ok(())
+                Ok(ExitCode::SUCCESS)
             } else {
                 for error in &report.errors {
                     eprintln!("{}: {}", error.path.display(), error.message);

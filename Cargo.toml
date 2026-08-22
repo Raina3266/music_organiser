@@ -2,6 +2,11 @@
 name = "music-tag-transfer"
 version = "0.1.0"
 edition = "2024"
+description = "Download Spotify link bundles and manage ID3 metadata recursively"
 
 [dependencies]
 id3 = "1.16.4"
+
+[profile.release]
+lto = "thin"
+strip = true
