@@ -18,18 +18,11 @@ USAGE:
     ",
     env!("CARGO_PKG_NAME"),
     " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
-    ",
-    env!("CARGO_PKG_NAME"),
-    " transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
-    ",
-    env!("CARGO_PKG_NAME"),
-    " <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
 
 COMMANDS:
     resolve     Convert free-text track descriptions into Spotify URLs
     download    Download Spotify links from a text file through spotDL
     delete      Remove selected ID3 tags from a folder recursively
-    transfer    Copy one ID3 frame between matching files recursively
 
 EXAMPLES:
     ",
@@ -65,11 +58,6 @@ pub enum Command {
         tags: Vec<TagSpec>,
         dry_run: bool,
     },
-    Transfer {
-        source: PathBuf,
-        destination: PathBuf,
-        frame_id: String,
-    },
     Help,
     Version,
 }
@@ -89,8 +77,6 @@ where
         "download" => parse_download(&args[1..]),
         "resolve" => parse_resolve(&args[1..]),
         "delete" => parse_delete(&args[1..]),
-        "transfer" => parse_transfer(&args[1..]),
-        _ if args.len() == 3 => parse_transfer(&args),
         _ => Err(format!("unknown command {command:?}")),
     }
 }
@@ -167,32 +153,6 @@ fn parse_delete(args: &[OsString]) -> Result<Command, String> {
         folder: PathBuf::from(positional[0]),
         tags,
         dry_run,
-    })
-}
-
-fn parse_transfer(args: &[OsString]) -> Result<Command, String> {
-    if args.len() != 3 {
-        return Err("transfer requires source folder, destination folder, and frame ID".to_owned());
-    }
-
-    let frame_id = args[2]
-        .to_str()
-        .ok_or_else(|| "frame ID must be valid UTF-8".to_owned())?
-        .to_owned();
-    if frame_id.len() != 4
-        || !frame_id
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-    {
-        return Err(
-            "frame ID must be four uppercase ASCII letters/digits, such as USLT".to_owned(),
-        );
-    }
-
-    Ok(Command::Transfer {
-        source: PathBuf::from(&args[0]),
-        destination: PathBuf::from(&args[1]),
-        frame_id,
     })
 }
 
@@ -279,18 +239,6 @@ mod tests {
                 name: "Encoded-by",
                 frame_id: "TENC"
             }]
-        );
-    }
-
-    #[test]
-    fn supports_legacy_transfer_invocation() {
-        assert_eq!(
-            parse_args(strings(&["source", "destination", "USLT"])).unwrap(),
-            Command::Transfer {
-                source: PathBuf::from("source"),
-                destination: PathBuf::from("destination"),
-                frame_id: "USLT".to_owned(),
-            }
         );
     }
 

@@ -2,7 +2,7 @@
 name = "music-tag-transfer"
 version = "0.1.0"
 edition = "2024"
-description = "Resolve and download Spotify links, then manage ID3 metadata recursively"
+description = "Resolve and download Spotify links, then delete ID3 metadata recursively"
 
 [dependencies]
 id3 = "1.16.4"
