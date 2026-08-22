@@ -1,1 +1,4 @@
 /target
+output.txt
+*-download-failures.txt
+cookies.txt

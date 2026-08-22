@@ -1,25 +1,53 @@
 use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
+use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
 
-pub const HELP: &str = "\
-music-tag-transfer
+pub const HELP: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "
 
 USAGE:
-    music-tag-transfer delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
-    music-tag-transfer transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
-    music-tag-transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
+    ",
+    env!("CARGO_PKG_NAME"),
+    " download [OPTIONS] <INPUT_FILE>
+    ",
+    env!("CARGO_PKG_NAME"),
+    " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
+    ",
+    env!("CARGO_PKG_NAME"),
+    " transfer <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
+    ",
+    env!("CARGO_PKG_NAME"),
+    " <SOURCE_FOLDER> <DESTINATION_FOLDER> <FRAME_ID>
 
-EXAMPLE:
-    music-tag-transfer delete \"/music\" \"[Encoded-by, Album Artist]\"
+COMMANDS:
+    download    Download Spotify links from a text file through spotDL
+    delete      Remove selected ID3 tags from a folder recursively
+    transfer    Copy one ID3 frame between matching files recursively
+
+EXAMPLES:
+    ",
+    env!("CARGO_PKG_NAME"),
+    " download spotify-links.txt --output ~/Documents/Music
+    ",
+    env!("CARGO_PKG_NAME"),
+    " delete \"/music\" \"[Encoded-by, Album Artist]\"
 
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.
 Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.
-";
+
+Run `",
+    env!("CARGO_PKG_NAME"),
+    " download --help` for downloader options.
+"
+);
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum Command {
+    Download(download_cli::Config),
+    DownloadHelp,
     Delete {
         folder: PathBuf,
         tags: Vec<TagSpec>,
@@ -31,6 +59,7 @@ pub enum Command {
         frame_id: String,
     },
     Help,
+    Version,
 }
 
 pub fn parse_args<I>(args: I) -> Result<Command, String>
@@ -44,10 +73,30 @@ where
 
     match command {
         "-h" | "--help" | "help" => Ok(Command::Help),
+        "-V" | "--version" => Ok(Command::Version),
+        "download" => parse_download(&args[1..]),
         "delete" => parse_delete(&args[1..]),
         "transfer" => parse_transfer(&args[1..]),
         _ if args.len() == 3 => parse_transfer(&args),
         _ => Err(format!("unknown command {command:?}")),
+    }
+}
+
+fn parse_download(args: &[OsString]) -> Result<Command, String> {
+    let args = args
+        .iter()
+        .map(|argument| {
+            argument
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "download arguments must be valid UTF-8".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    match download_cli::parse_args(args)? {
+        DownloadCommand::Run(config) => Ok(Command::Download(config)),
+        DownloadCommand::Help => Ok(Command::DownloadHelp),
+        DownloadCommand::Version => Ok(Command::Version),
     }
 }
 
@@ -202,6 +251,33 @@ mod tests {
                 destination: PathBuf::from("destination"),
                 frame_id: "USLT".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn delegates_download_options() {
+        let command = parse_args(strings(&[
+            "download",
+            "spotify-links.txt",
+            "--output",
+            "downloads",
+            "--non-interactive",
+        ]))
+        .unwrap();
+
+        let Command::Download(config) = command else {
+            panic!("expected the download command");
+        };
+        assert_eq!(config.input, PathBuf::from("spotify-links.txt"));
+        assert_eq!(config.output, PathBuf::from("downloads"));
+        assert!(config.non_interactive);
+    }
+
+    #[test]
+    fn delegates_download_help() {
+        assert_eq!(
+            parse_args(strings(&["download", "--help"])).unwrap(),
+            Command::DownloadHelp
         );
     }
 }
