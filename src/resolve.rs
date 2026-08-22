@@ -332,13 +332,15 @@ mod tests {
 
     #[test]
     fn supports_an_empty_search_result() {
-        let response: SearchResponse =
-            serde_json::from_str(r#"{"tracks":{"items":[]}}"#).unwrap();
+        let response: SearchResponse = serde_json::from_str(r#"{"tracks":{"items":[]}}"#).unwrap();
         assert_eq!(first_track(response), None);
     }
 
     #[test]
     fn flattens_error_messages_for_comment_output() {
-        assert_eq!(one_line("first line\n  second line"), "first line second line");
+        assert_eq!(
+            one_line("first line\n  second line"),
+            "first line second line"
+        );
     }
 }

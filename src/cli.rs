@@ -108,7 +108,10 @@ fn parse_resolve(args: &[OsString]) -> Result<Command, String> {
         .iter()
         .find(|argument| argument.to_string_lossy().starts_with('-'))
     {
-        return Err(format!("unknown resolve option {:?}", option.to_string_lossy()));
+        return Err(format!(
+            "unknown resolve option {:?}",
+            option.to_string_lossy()
+        ));
     }
 
     Ok(Command::Resolve(resolve::Config {
