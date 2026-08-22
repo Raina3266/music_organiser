@@ -5,7 +5,7 @@ use std::{
 
 const MUSIC_EXTENSIONS: &[&str] = &["mp1", "mp2", "mp3", "wav", "aif", "aiff"];
 
-pub fn music_files_recursively(root: &Path) -> io::Result<Vec<PathBuf>> {
+pub(crate) fn music_files_recursively(root: &Path) -> io::Result<Vec<PathBuf>> {
     if !root.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

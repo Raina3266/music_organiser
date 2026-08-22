@@ -14,6 +14,9 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const MAX_TOKEN_REPLACEMENTS: u32 = 3;
+const MAX_TOKEN_PROMPTS: u32 = 3;
+
 /// Download every unique Spotify link in `config.input` through spotDL.
 ///
 /// A return value of `0` means every entry completed; `1` means a retry list
@@ -72,7 +75,7 @@ pub fn run(config: Config) -> Result<i32, String> {
     let total = input.entries.len();
     let mut completed = 0usize;
     let mut failures = Vec::new();
-    let mut stopped: Option<(usize, String)> = None;
+    let mut stop = None;
     let mut deno_install_attempted = false;
 
     for (index, entry) in input.entries.iter().enumerate() {
@@ -92,7 +95,10 @@ pub fn run(config: Config) -> Result<i32, String> {
             EntryOutcome::Abort(reason) => {
                 eprintln!("Stopped: {reason}");
                 failures.push(Failure::new(entry, reason.clone()));
-                stopped = Some((index, reason));
+                stop = Some(Stop {
+                    entry_index: index,
+                    reason,
+                });
                 break;
             }
         }
@@ -100,18 +106,18 @@ pub fn run(config: Config) -> Result<i32, String> {
 
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
-    if let Some((index, reason)) = &stopped {
-        let remaining = total.saturating_sub(*index + 1);
+    if let Some(stop) = &stop {
+        let remaining = total.saturating_sub(stop.entry_index + 1);
         println!("Not attempted: {remaining}");
-        println!("Reason for stopping: {reason}");
+        println!("Reason for stopping: {}", stop.reason);
         println!(
             "Rerun the same command after fixing the reported problem; existing files will be skipped."
         );
     }
 
-    let pending_start = stopped
+    let pending_start = stop
         .as_ref()
-        .map(|(index, _)| index + 1)
+        .map(|stop| stop.entry_index + 1)
         .unwrap_or(total);
     let failed_urls_path = output::write_failed_urls(
         &config.output,
@@ -124,11 +130,11 @@ pub fn run(config: Config) -> Result<i32, String> {
     println!("Retry URL list: {}", failed_urls_path.display());
 
     if !failures.is_empty() {
-        let report = write_failure_report(&config.output, &failures, stopped.as_ref())?;
+        let report = write_failure_report(&config.output, &failures, stop.as_ref())?;
         println!("Failure report: {}", report.display());
     }
 
-    Ok(if failures.is_empty() && stopped.is_none() {
+    Ok(if failures.is_empty() && stop.is_none() {
         0
     } else {
         1
@@ -188,7 +194,7 @@ fn download_entry(
                     ));
                 }
                 let reason = "Spotify rejected or expired the official-API access token.";
-                if !interactive || token_replacements >= 3 {
+                if !interactive || token_replacements >= MAX_TOKEN_REPLACEMENTS {
                     return Ok(EntryOutcome::Abort(format!(
                         "{reason} Supply a fresh token with SPOTIFY_AUTH_TOKEN, --token-file, or --auth-token."
                     )));
@@ -346,7 +352,7 @@ fn replace_token(current: &mut Option<String>, reason: &str) -> Result<bool, Str
 }
 
 fn prompt_for_new_token(current: Option<&str>, reason: &str) -> Result<Option<String>, String> {
-    for attempt in 1..=3 {
+    for attempt in 1..=MAX_TOKEN_PROMPTS {
         match token::prompt_for_token(reason) {
             Ok(Some(candidate)) => {
                 if current.is_some_and(|existing| existing == candidate.as_str()) {
@@ -356,11 +362,19 @@ fn prompt_for_new_token(current: Option<&str>, reason: &str) -> Result<Option<St
                 return Ok(Some(candidate));
             }
             Ok(None) => return Ok(None),
-            Err(error) if attempt < 3 => eprintln!("Invalid token: {error}"),
-            Err(error) => return Err(format!("invalid token after 3 attempts: {error}")),
+            Err(error) if attempt < MAX_TOKEN_PROMPTS => {
+                eprintln!("Invalid token: {error}");
+            }
+            Err(error) => {
+                return Err(format!(
+                    "invalid token after {MAX_TOKEN_PROMPTS} attempts: {error}"
+                ));
+            }
         }
     }
-    Err("no new token was supplied after 3 attempts".into())
+    Err(format!(
+        "no new token was supplied after {MAX_TOKEN_PROMPTS} attempts"
+    ))
 }
 
 #[derive(Debug)]
@@ -377,6 +391,12 @@ struct Failure {
     reason: String,
 }
 
+#[derive(Debug)]
+struct Stop {
+    entry_index: usize,
+    reason: String,
+}
+
 impl Failure {
     fn new(entry: &Entry, reason: String) -> Self {
         Self {
@@ -390,7 +410,7 @@ impl Failure {
 fn write_failure_report(
     output_dir: &Path,
     failures: &[Failure],
-    stopped: Option<&(usize, String)>,
+    stop: Option<&Stop>,
 ) -> Result<std::path::PathBuf, String> {
     let path = output_dir.join(format!("{}-download-failures.txt", env!("CARGO_PKG_NAME")));
     let timestamp = SystemTime::now()
@@ -401,11 +421,11 @@ fn write_failure_report(
         "{} download failure report\nrun_unix_time={timestamp}\n",
         env!("CARGO_PKG_NAME")
     );
-    if let Some((index, reason)) = stopped {
+    if let Some(stop) = stop {
         report.push_str(&format!(
             "stopped_after_input_index={}\nstop_reason={}\n",
-            *index + 1,
-            one_line(reason)
+            stop.entry_index + 1,
+            one_line(&stop.reason)
         ));
     }
     report.push('\n');

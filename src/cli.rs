@@ -48,7 +48,9 @@ Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.
 
 Run `",
     env!("CARGO_PKG_NAME"),
-    " <COMMAND> --help` for command-specific help.
+    " download --help` or `",
+    env!("CARGO_PKG_NAME"),
+    " resolve --help` for command-specific help.
 "
 );
 

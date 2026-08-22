@@ -3,24 +3,24 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
-    pub line: usize,
-    pub url: String,
+pub(super) struct Entry {
+    pub(super) line: usize,
+    pub(super) url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InputList {
-    pub entries: Vec<Entry>,
-    pub duplicate_count: usize,
+pub(super) struct InputList {
+    pub(super) entries: Vec<Entry>,
+    pub(super) duplicate_count: usize,
 }
 
-pub fn load(path: &Path) -> Result<InputList, String> {
+pub(super) fn load(path: &Path) -> Result<InputList, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     parse(&contents)
 }
 
-pub fn parse(contents: &str) -> Result<InputList, String> {
+fn parse(contents: &str) -> Result<InputList, String> {
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
     let mut duplicate_count = 0;
@@ -73,7 +73,7 @@ pub fn parse(contents: &str) -> Result<InputList, String> {
     })
 }
 
-pub fn normalize_spotify_url(raw: &str) -> Result<String, String> {
+fn normalize_spotify_url(raw: &str) -> Result<String, String> {
     let value = raw.trim();
     if value.chars().any(char::is_whitespace) {
         return Err("URL contains whitespace".into());
