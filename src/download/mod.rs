@@ -40,14 +40,14 @@ pub fn run(config: Config) -> Result<i32, String> {
             "Warning: could not parse the spotDL version. The download command requires spotDL 4.5.0 or newer."
         );
     }
-    if !config.official_api {
-        if let Some(risk) = spotdl::official_config_risk()? {
-            return Err(format!(
-                "spotDL config {} enables official-only setting(s): {}. The download command stopped before downloading so token-free mode is not silently overridden. Set load_config to false, clear those settings, or rerun with --official-api intentionally.",
-                risk.path.display(),
-                risk.settings.join(", ")
-            ));
-        }
+    if !config.official_api
+        && let Some(risk) = spotdl::official_config_risk()?
+    {
+        return Err(format!(
+            "spotDL config {} enables official-only setting(s): {}. The download command stopped before downloading so token-free mode is not silently overridden. Set load_config to false, clear those settings, or rerun with --official-api intentionally.",
+            risk.path.display(),
+            risk.settings.join(", ")
+        ));
     }
     println!(
         "Loaded {} unique Spotify link(s) from {}.",
@@ -145,10 +145,10 @@ fn initial_token(config: &Config) -> Result<Option<String>, String> {
     if let Some(path) = &config.token_file {
         return token::read_token_file(path).map(Some);
     }
-    if let Ok(raw_token) = env::var("SPOTIFY_AUTH_TOKEN") {
-        if !raw_token.trim().is_empty() {
-            return token::clean_token(&raw_token).map(Some);
-        }
+    if let Ok(raw_token) = env::var("SPOTIFY_AUTH_TOKEN")
+        && !raw_token.trim().is_empty()
+    {
+        return token::clean_token(&raw_token).map(Some);
     }
     Ok(None)
 }
@@ -214,16 +214,17 @@ fn download_entry(
                 )));
             }
             Classification::RateLimited(retry_after) => {
-                if let Some(seconds) = retry_after {
-                    if !waited_for_rate_limit && seconds <= config.max_rate_limit_wait {
-                        let seconds = seconds.max(1);
-                        eprintln!(
-                            "Spotify asked us to wait {seconds} second(s); respecting Retry-After before one retry."
-                        );
-                        thread::sleep(Duration::from_secs(seconds));
-                        waited_for_rate_limit = true;
-                        continue;
-                    }
+                if let Some(seconds) = retry_after
+                    && !waited_for_rate_limit
+                    && seconds <= config.max_rate_limit_wait
+                {
+                    let seconds = seconds.max(1);
+                    eprintln!(
+                        "Spotify asked us to wait {seconds} second(s); respecting Retry-After before one retry."
+                    );
+                    thread::sleep(Duration::from_secs(seconds));
+                    waited_for_rate_limit = true;
+                    continue;
                 }
 
                 let delay = retry_after
