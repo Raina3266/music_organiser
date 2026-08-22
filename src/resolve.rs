@@ -132,7 +132,7 @@ async fn run_async(config: Config) -> Result<Report, String> {
             continue;
         }
 
-        eprint!("[{}/{}] "{}" -> ", index + 1, total, query);
+        eprint!("[{}/{}] \"{}\" -> ", index + 1, total, query);
         let _ = io::stderr().flush();
 
         match search_track(&client, &token, query).await {
@@ -289,7 +289,7 @@ fn first_track(response: SearchResponse) -> Option<TrackMatch> {
             .join(", ");
         TrackMatch {
             url: track.external_urls.spotify,
-            description: format!(""{}" by {artists}", track.name),
+            description: format!("\"{}\" by {artists}", track.name),
         }
     })
 }
