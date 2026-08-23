@@ -161,7 +161,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); stripped {} rating/encoder frame(s); wrote {} copyright message(s).",
+        "Metadata: updated {} file(s); stripped {} rating/encoder/year frame(s); wrote {} copyright message(s).",
         metadata_totals.files_updated,
         metadata_totals.frames_stripped,
         metadata_totals.copyrights_written
@@ -181,6 +181,10 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         metadata_totals.lyrics_embedded,
         metadata_totals.lines_embedded,
         metadata_totals.sylt_frames_removed
+    );
+    println!(
+        "Names: dropped the track ID from {} file name(s); {} replaced an earlier download.",
+        metadata_totals.files_renamed, metadata_totals.files_replaced
     );
     if !metadata_totals.failures.is_empty() {
         println!(
@@ -273,6 +277,28 @@ fn apply_metadata(
             copyright.as_deref(),
             &config.language,
         ));
+        // The track ID is only there to tie a file back to the line that asked
+        // for it, which is done by now. A file whose tag could not be finished
+        // is renamed too, so a retry of that line replaces it instead of
+        // leaving both names behind.
+        match files::drop_track_id_suffix(file) {
+            Ok(Some(rename)) => {
+                report.files_renamed += 1;
+                if rename.replaced {
+                    report.files_replaced += 1;
+                    println!(
+                        "Renamed to {}, replacing an earlier download of the same name.",
+                        rename.target.display()
+                    );
+                }
+            }
+            Ok(None) => {}
+            // The audio and its tag are finished; only the name is untidy.
+            Err(error) => eprintln!(
+                "Name: cannot drop the track ID from {}: {error}",
+                file.display()
+            ),
+        }
     }
     report.copyright_lookups_failed = lookups_failed;
 
@@ -299,7 +325,7 @@ fn apply_metadata(
             "taken from --language"
         };
         println!(
-            "Updated the tag: stripped {} rating/encoder frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
+            "Updated the tag: stripped {} rating/encoder/year frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
             report.frames_stripped, report.copyrights_written
         );
     }

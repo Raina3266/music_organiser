@@ -34,7 +34,12 @@ const TAG_VERSION: Version = Version::Id3v23;
 /// `POPM` is the popularimeter spotDL fills from Spotify's popularity score —
 /// the frame taggers display as a rating. `TSSE` is the encoder-settings string
 /// FFmpeg leaves behind, which describes the transcode rather than the music.
-const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE"];
+///
+/// `TYER` is the release year. spotDL writes it beside the full `TDRC`
+/// recording date it also writes, so the year is the same information a second
+/// time with the day and month thrown away, and taggers show the pair as two
+/// competing date fields. `TDRC` is kept because it is the complete one.
+const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE", "TYER"];
 /// The copyright message frame.
 const COPYRIGHT_FRAME: &str = "TCOP";
 /// The language frame. ID3v2.3 specifies an ISO-639-2 code here, but the
@@ -61,6 +66,12 @@ pub struct MetadataReport {
     pub lines_embedded: usize,
     /// `SYLT` frames removed, spotDL's own included.
     pub sylt_frames_removed: usize,
+    /// Files renamed out of spotDL's `[{track-id}]` naming once their tag was
+    /// written. Renaming finishes a download rather than a tag, so `finalize`
+    /// never sets this.
+    pub files_renamed: usize,
+    /// Renames that replaced an earlier download of the same track.
+    pub files_replaced: usize,
     /// Files that could not be finished, and why. Their `.lrc` sidecar is kept.
     pub failures: Vec<FileError>,
 }
@@ -75,6 +86,8 @@ impl MetadataReport {
         self.lyrics_embedded += other.lyrics_embedded;
         self.lines_embedded += other.lines_embedded;
         self.sylt_frames_removed += other.sylt_frames_removed;
+        self.files_renamed += other.files_renamed;
+        self.files_replaced += other.files_replaced;
         self.failures.extend(other.failures);
     }
 
@@ -321,6 +334,16 @@ mod tests {
             "TSSE",
             Content::Text("Lavf58.76.100".to_owned()),
         ));
+        // spotDL writes the release date twice: the whole date in TDRC, and
+        // the year again in TYER.
+        tag.add_frame(Frame::with_content(
+            "TDRC",
+            Content::Text("2001-03-12".to_owned()),
+        ));
+        tag.add_frame(Frame::with_content(
+            "TYER",
+            Content::Text("2001".to_owned()),
+        ));
         tag.add_frame(id3::frame::Lyrics {
             lang: "eng".to_owned(),
             description: String::new(),
@@ -357,7 +380,7 @@ mod tests {
         let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
-        assert_eq!(report.frames_stripped, 2);
+        assert_eq!(report.frames_stripped, 3);
         assert_eq!(report.copyrights_written, 1);
         assert_eq!(report.lyrics_embedded, 1);
         assert_eq!(report.lines_embedded, 2);
@@ -367,6 +390,12 @@ mod tests {
         let tag = Tag::read_from_path(&audio).unwrap();
         assert!(tag.get("POPM").is_none());
         assert!(tag.get("TSSE").is_none());
+        // The redundant year goes; the whole date it duplicated stays.
+        assert!(tag.get("TYER").is_none());
+        assert_eq!(
+            tag.get("TDRC").and_then(|frame| frame.content().text()),
+            Some("2001-03-12")
+        );
         assert_eq!(
             tag.get(COPYRIGHT_FRAME).and_then(|f| f.content().text()),
             Some("\u{2117} 2001 Daft Life Limited")
@@ -419,13 +448,19 @@ mod tests {
 
         let report = finalize(&audio, None, &english());
         assert_eq!(report.failures, Vec::new());
-        assert_eq!(report.frames_stripped, 2);
+        assert_eq!(report.frames_stripped, 3);
         assert_eq!(report.lyrics_embedded, 0);
         assert_eq!(report.copyrights_written, 0);
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert!(tag.get("POPM").is_none());
         assert!(tag.get("TSSE").is_none());
+        // The redundant year goes; the whole date it duplicated stays.
+        assert!(tag.get("TYER").is_none());
+        assert_eq!(
+            tag.get("TDRC").and_then(|frame| frame.content().text()),
+            Some("2001-03-12")
+        );
         // Without a .lrc file to paste, whatever spotDL wrote into the lyrics
         // frame stays; only its synchronised frame is removed.
         assert_eq!(tag.lyrics().count(), 1);

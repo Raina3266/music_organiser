@@ -287,7 +287,7 @@ Two caveats:
 - Existing downloads are not moved. Rerunning the same input file re-downloads
   them into the new layout, because `--overwrite force` is used.
 
-### Rating, encoder, copyright, and language frames
+### Rating, encoder, date, copyright, and language frames
 
 A freshly downloaded file carries two frames that describe the download rather
 than the music: `POPM`, the popularimeter spotDL fills from Spotify's
@@ -296,21 +296,35 @@ encoder-settings string FFmpeg leaves behind (something like `Lavf58.76.100`).
 spotDL also leaves `TCOP` empty, because a single-track fetch does not carry
 the album's copyright.
 
-After each download this program rewrites four frames:
+spotDL writes the release date **twice**: the whole date in `TDRC`
+(`2020-05-20`) and the year again in `TYER` (`2020`). `TDRC` is ID3v2.4's
+single timestamp frame; `TYER` is the ID3v2.3 frame it replaced, and spotDL
+writes both so that readers of either version find a date. Taggers show the
+pair as two competing date fields.
+
+After each download this program rewrites five frames:
 
 | Frame | What happens |
 |---|---|
 | `POPM` | Removed outright |
 | `TSSE` | Removed outright |
+| `TYER` | Removed outright, leaving the complete `TDRC` date |
 | `TCOP` | Set to the copyright message looked up on iTunes |
 | `TLAN` | Set to the name of the language detected from the lyrics, or `--language` |
+
+Dropping `TYER` leaves the date in a v2.4 frame inside a v2.3 tag, which
+Mp3tag, foobar2000, MusicBee, VLC, Plex, and Jellyfin all read. Strict v2.3
+readers — Windows Explorer's Year column, Windows Media Player, and some older
+car head units and portable players — look only at `TYER` and will show no
+year. Keep it by removing `"TYER"` from `STRIPPED_FRAMES` in `src/metadata.rs`
+if your players need it.
 
 Removal happens after spotDL is finished with the file, so it catches whatever
 FFmpeg wrote during the transcode. Files downloaded before this existed can be
 cleaned up with the `delete` command:
 
 ```bash
-music-tag-transfer delete "/path/to/music" "[Encoding Settings]"
+music-tag-transfer delete "/path/to/music" "[Encoding Settings, Year]"
 ```
 
 `TSRC` is deliberately **not** touched. spotDL already fills the ISRC from its
@@ -416,6 +430,34 @@ That works for every form, including the lines that name no single Spotify
 track, so an album or playlist line gets all of its songs tagged. For a line
 that does name a single track, the Spotify track ID in the forced
 `[{track-id}]` output template is kept as a fallback.
+
+### The track ID is removed from the file name
+
+spotDL is asked for the `[{track-id}]` suffix only so that a file can be tied
+back to the line that asked for it. That job is done once the tag has been
+rewritten, so each file is then renamed without it:
+
+```text
+i-dle - Luv U [2Mvdcda3pVMDASD7oZWPr4].mp3   →   i-dle - Luv U.mp3
+```
+
+Only a trailing bracketed run of 16 to 32 letters and digits is removed, so a
+bracket that belongs to the title survives: `Artist - Song [Live]
+[2Mvdcda3pVMDASD7oZWPr4].mp3` becomes `Artist - Song [Live].mp3`. A `.lrc`
+file still sitting next to the audio — which happens only when the metadata
+step could not finish — is renamed with it.
+
+Because `--overwrite force` means a rerun downloads every line again, a file
+already using the trimmed name is an earlier download of the same track in the
+same album folder, and it is replaced. The run prints a line naming any file
+replaced this way, and the closing summary counts them:
+
+```text
+Names: dropped the track ID from 12 file name(s); 1 replaced an earlier download.
+```
+
+A rename that fails is reported and nothing else is affected: the audio and its
+tag are already finished, so only the name is left untidy.
 
 ### Download execution and output files
 

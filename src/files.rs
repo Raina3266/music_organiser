@@ -102,6 +102,83 @@ pub(crate) fn music_files_for_track(root: &Path, track_id: &str) -> io::Result<V
         .collect())
 }
 
+/// A file renamed out of spotDL's `[{track-id}]` naming.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct Rename {
+    /// Where the file now lives.
+    pub(crate) target: PathBuf,
+    /// Whether an earlier file of that name was replaced.
+    pub(crate) replaced: bool,
+}
+
+/// How long the bracketed run of letters and digits at the end of a downloaded
+/// file name may be for it to count as a track ID.
+///
+/// A Spotify track ID is 22 base62 characters. The range leaves room either
+/// side of that without ever reaching a bracketed word belonging to the title,
+/// such as `[Live]` or `[Remix]`.
+const TRACK_ID_LENGTH: std::ops::RangeInclusive<usize> = 16..=32;
+
+/// A file stem with spotDL's trailing `[{track-id}]` removed, if it has one.
+pub(crate) fn stem_without_track_id(stem: &str) -> Option<&str> {
+    let (name, track_id) = stem.strip_suffix(']')?.rsplit_once('[')?;
+    if !TRACK_ID_LENGTH.contains(&track_id.len())
+        || !track_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+
+    let name = name.trim_end();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Rename a downloaded file to the name without its `[{track-id}]` suffix.
+///
+/// Any `.lrc` sidecar still sitting next to the audio moves with it, so a file
+/// whose metadata could not be finished keeps its lyrics within reach.
+/// `Ok(None)` means the name carries no track ID and nothing was moved.
+///
+/// spotDL runs with `--overwrite force`, so a file already using the trimmed
+/// name is an earlier download of the same track in the same album folder, and
+/// replacing it is what that overwrite policy asks for. It is reported so the
+/// run says out loud that a file was replaced.
+pub(crate) fn drop_track_id_suffix(audio: &Path) -> io::Result<Option<Rename>> {
+    let Some(trimmed) = audio
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(stem_without_track_id)
+    else {
+        return Ok(None);
+    };
+
+    // The trimmed stem may itself contain a dot, as in "Artist - Song feat.
+    // Someone", so the extension is joined on by hand rather than through
+    // `set_extension`, which would overwrite everything after that dot.
+    let file_name = match audio.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) => format!("{trimmed}.{extension}"),
+        None => trimmed.to_owned(),
+    };
+    let target = audio.with_file_name(file_name);
+    if target == audio {
+        return Ok(None);
+    }
+
+    let replaced = target.exists();
+    if replaced {
+        fs::remove_file(&target)?;
+    }
+
+    let sidecar = sibling_lyrics_file(audio);
+    fs::rename(audio, &target)?;
+    if let Some(sidecar) = sidecar {
+        fs::rename(&sidecar, target.with_extension(LYRICS_EXTENSION))?;
+    }
+
+    Ok(Some(Rename { target, replaced }))
+}
+
 fn files_recursively(root: &Path, extensions: &[&str]) -> io::Result<Vec<PathBuf>> {
     if !root.is_dir() {
         return Err(io::Error::new(
@@ -200,6 +277,77 @@ mod tests {
             snapshot.files_written_since(&root).unwrap(),
             vec![added, existing]
         );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recognizes_only_a_trailing_track_id() {
+        assert_eq!(
+            stem_without_track_id("i-dle - Luv U [2Mvdcda3pVMDASD7oZWPr4]"),
+            Some("i-dle - Luv U")
+        );
+        // A bracketed part of the title is kept; only the last group goes.
+        assert_eq!(
+            stem_without_track_id("Artist - Song [Live] [2Mvdcda3pVMDASD7oZWPr4]"),
+            Some("Artist - Song [Live]")
+        );
+        // Nothing that is not a track ID is touched.
+        assert_eq!(stem_without_track_id("Artist - Song [Live]"), None);
+        assert_eq!(stem_without_track_id("Artist - Song [Remastered]"), None);
+        assert_eq!(stem_without_track_id("Artist - Song"), None);
+        assert_eq!(stem_without_track_id("Artist - Song []"), None);
+        // A name that is nothing but a track ID would be renamed to nothing.
+        assert_eq!(stem_without_track_id("[2Mvdcda3pVMDASD7oZWPr4]"), None);
+        // Track IDs are base62; punctuation means this is part of the title.
+        assert_eq!(
+            stem_without_track_id("Artist - Song [a very long note here!]"),
+            None
+        );
+    }
+
+    #[test]
+    fn renaming_moves_the_lyrics_sidecar_and_keeps_a_dotted_name() {
+        let root = std::env::temp_dir().join(format!("music-rename-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+
+        let audio = root.join("Artist - Song feat. Someone [2Mvdcda3pVMDASD7oZWPr4].mp3");
+        let sidecar = root.join("Artist - Song feat. Someone [2Mvdcda3pVMDASD7oZWPr4].lrc");
+        fs::write(&audio, b"audio").unwrap();
+        fs::write(&sidecar, b"[00:01.00]line").unwrap();
+
+        let rename = drop_track_id_suffix(&audio).unwrap().unwrap();
+
+        assert_eq!(rename.target, root.join("Artist - Song feat. Someone.mp3"));
+        assert!(!rename.replaced);
+        assert!(rename.target.is_file());
+        assert!(!audio.exists());
+        assert!(!sidecar.exists());
+        assert!(root.join("Artist - Song feat. Someone.lrc").is_file());
+
+        // A file without a track ID is left exactly where it is.
+        assert_eq!(drop_track_id_suffix(&rename.target).unwrap(), None);
+        assert!(rename.target.is_file());
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn renaming_replaces_an_earlier_download_of_the_same_name() {
+        let root = std::env::temp_dir().join(format!("music-replace-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+
+        let existing = root.join("Artist - Song.mp3");
+        fs::write(&existing, b"old download").unwrap();
+        let audio = root.join("Artist - Song [2Mvdcda3pVMDASD7oZWPr4].mp3");
+        fs::write(&audio, b"new download").unwrap();
+
+        let rename = drop_track_id_suffix(&audio).unwrap().unwrap();
+
+        assert_eq!(rename.target, existing);
+        assert!(rename.replaced);
+        assert_eq!(fs::read_to_string(&existing).unwrap(), "new download");
+        assert!(!audio.exists());
 
         fs::remove_dir_all(&root).unwrap();
     }

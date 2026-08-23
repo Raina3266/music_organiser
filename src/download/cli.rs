@@ -270,12 +270,19 @@ FILE LAYOUT:
     against what was there before it ran, so an album or playlist line has
     every one of its songs tagged.
 
+    spotDL is asked to end each name with the Spotify track ID so a file can
+    be tied back to its line. Once the tag is written the suffix has done its
+    job and is removed, leaving \"i-dle - Luv U.mp3\". A file already using the
+    trimmed name is an earlier download of the same track and is replaced.
+
 METADATA:
     After each download the ID3v2.3 tag is rewritten:
 
         POPM   the rating frame spotDL writes from Spotify's popularity
                score is removed
         TSSE   the encoder-settings string FFmpeg leaves behind is removed
+        TYER   the year spotDL writes beside the whole TDRC date is removed,
+               leaving one date frame instead of two
         TCOP   the copyright message, looked up per album on the iTunes
                Search API, which needs no account, key, or token
         TLAN   the language as a readable name - English, Chinese,
