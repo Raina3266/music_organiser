@@ -7,12 +7,13 @@ mod token;
 use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
-use crate::lyrics::{self, LyricsReport};
-use std::collections::HashSet;
+use crate::files::music_files_for_track;
+use crate::metadata::{self, MetadataReport};
+use crate::spotify::{Client as SpotifyClient, Credentials};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -20,11 +21,12 @@ const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
 /// Download every unique `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair in
-/// `config.input` through spotDL, then move each generated `.lrc` file into an
-/// ID3v2.3 SYLT frame.
+/// `config.input` through spotDL, then rewrite each file's ID3v2.3 tag: drop
+/// the POPM rating, store the Spotify copyright, and move the generated `.lrc`
+/// file into a SYLT frame.
 ///
-/// A return value of `0` means every pair downloaded and had its synced lyrics
-/// embedded; `1` means a retry list was written for failed or unattempted
+/// A return value of `0` means every pair downloaded and had its metadata
+/// applied; `1` means a retry list was written for failed or unattempted
 /// pairs.
 pub fn run(config: Config) -> Result<i32, String> {
     let input = input::load(&config.input)?;
@@ -76,14 +78,21 @@ pub fn run(config: Config) -> Result<i32, String> {
     }
 
     let interactive = !config.non_interactive && io::stdin().is_terminal();
+    let mut spotify = if config.no_copyright {
+        println!("Copyright lookup: disabled with --no-copyright.");
+        None
+    } else {
+        let credentials = Credentials::resolve(interactive)?;
+        println!("Authenticating with the Spotify Web API for copyright lookups...");
+        Some(SpotifyClient::connect(&credentials)?)
+    };
     let mut auth_token = initial_token(&config)?;
     let total = input.entries.len();
     let mut completed = 0usize;
     let mut failures = Vec::new();
     let mut stop = None;
     let mut deno_install_attempted = false;
-    let mut lyrics_totals = LyricsReport::default();
-    let mut retained_lyrics: HashSet<PathBuf> = HashSet::new();
+    let mut metadata_totals = MetadataReport::default();
 
     for (index, entry) in input.entries.iter().enumerate() {
         println!("\n[{}/{}] Downloading {}", index + 1, total, entry.query);
@@ -95,7 +104,7 @@ pub fn run(config: Config) -> Result<i32, String> {
             &mut deno_install_attempted,
         )?;
         if matches!(outcome, EntryOutcome::Completed) {
-            outcome = embed_lyrics(&config, &mut retained_lyrics, &mut lyrics_totals);
+            outcome = apply_metadata(&config, entry, spotify.as_mut(), &mut metadata_totals);
         }
         match outcome {
             EntryOutcome::Completed => completed += 1,
@@ -118,15 +127,21 @@ pub fn run(config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Synced lyrics: embedded {} file(s) as SYLT ({} line(s)); removed {} USLT frame(s).",
-        lyrics_totals.files_embedded,
-        lyrics_totals.lines_embedded,
-        lyrics_totals.uslt_frames_removed
+        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s).",
+        metadata_totals.files_updated,
+        metadata_totals.ratings_removed,
+        metadata_totals.copyrights_written
     );
-    if !lyrics_totals.failures.is_empty() {
+    println!(
+        "Synced lyrics: embedded {} file(s) as SYLT ({} line(s)); removed {} USLT frame(s).",
+        metadata_totals.lyrics_embedded,
+        metadata_totals.lines_embedded,
+        metadata_totals.uslt_frames_removed
+    );
+    if !metadata_totals.failures.is_empty() {
         println!(
-            "Kept {} .lrc file(s) whose lyrics could not be embedded; their pairs are in the retry list.",
-            lyrics_totals.failures.len()
+            "{} file(s) could not be finished; any .lrc file was kept and the pair is in the retry list.",
+            metadata_totals.failures.len()
         );
     }
     if let Some(stop) = &stop {
@@ -164,39 +179,77 @@ pub fn run(config: Config) -> Result<i32, String> {
     })
 }
 
-/// Turn the `.lrc` files spotDL just generated into verified SYLT frames.
+/// Rewrite the tag of every file spotDL just wrote for this pair.
 ///
-/// A pair whose lyrics cannot be embedded is reported as failed so it lands in
-/// the retry list, and its `.lrc` file stays on disk. That file is then
-/// remembered so the same failure is not charged to every later pair.
-fn embed_lyrics(
+/// The pair's Spotify track ID both selects those files — the forced output
+/// template puts it in the file name — and drives the copyright lookup. A file
+/// that cannot be finished is reported as a failure so its pair lands in the
+/// retry list, and its `.lrc` sidecar is left on disk.
+fn apply_metadata(
     config: &Config,
-    retained: &mut HashSet<PathBuf>,
-    totals: &mut LyricsReport,
+    entry: &Entry,
+    spotify: Option<&mut SpotifyClient>,
+    totals: &mut MetadataReport,
 ) -> EntryOutcome {
-    let report = match lyrics::embed_synced_lyrics(&config.output, retained) {
-        Ok(report) => report,
-        Err(error) => return EntryOutcome::Abort(error),
+    let copyright = match spotify {
+        Some(client) => match client.copyright(&entry.track_id) {
+            Ok(copyright) => {
+                if copyright.is_none() {
+                    println!("Spotify lists no copyright for this track.");
+                }
+                copyright
+            }
+            Err(error) => {
+                return EntryOutcome::Failed(format!(
+                    "the audio downloaded but its copyright could not be fetched: {error}"
+                ));
+            }
+        },
+        None => None,
     };
 
-    if report.files_scanned == 0 {
-        println!("No .lrc file was generated; spotDL found no synchronised lyrics for this pair.");
+    let files = match music_files_for_track(&config.output, &entry.track_id) {
+        Ok(files) => files,
+        Err(error) => {
+            return EntryOutcome::Abort(format!(
+                "cannot scan {} for downloaded audio: {error}",
+                config.output.display()
+            ));
+        }
+    };
+    if files.is_empty() {
+        return EntryOutcome::Failed(format!(
+            "spotDL reported success but no audio file named [{}] was found in {}",
+            entry.track_id,
+            config.output.display()
+        ));
     }
+
+    let mut report = MetadataReport::default();
+    for file in &files {
+        report.absorb(metadata::finalize(file, copyright.as_deref()));
+    }
+
     let reasons = report
         .failures
         .iter()
         .map(|failure| format!("{}: {}", failure.path.display(), failure.message))
         .collect::<Vec<_>>();
     for reason in &reasons {
-        eprintln!("Lyrics: {reason}");
+        eprintln!("Metadata: {reason}");
     }
-    for failure in &report.failures {
-        retained.insert(failure.path.clone());
-    }
-    if report.files_embedded > 0 {
+    if report.files_updated > 0 {
+        let lyrics = if report.lyrics_embedded > 0 {
+            format!(
+                ", embedded {} line(s) of synced lyrics as SYLT and deleted the .lrc file",
+                report.lines_embedded
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "Embedded {} line(s) of synced lyrics as SYLT and deleted the .lrc file.",
-            report.lines_embedded
+            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s){lyrics}.",
+            report.ratings_removed, report.copyrights_written
         );
     }
 
@@ -204,7 +257,7 @@ fn embed_lyrics(
         EntryOutcome::Completed
     } else {
         EntryOutcome::Failed(format!(
-            "the audio downloaded but its synced lyrics were not embedded ({}); the .lrc file was kept",
+            "the audio downloaded but its metadata was not finished ({})",
             reasons.join("; ")
         ))
     };

@@ -1,12 +1,11 @@
 # music-organiser
 
 `music-organiser` is a Rust command-line project for preparing and maintaining
-a local music library. One executable provides three related workflows:
+a local music library. One executable provides two related workflows:
 
 | Command | Purpose |
 |---|---|
-| `resolve` | Search Spotify for free-text track descriptions and write Spotify URLs |
-| `download` | Download `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` pairs through spotDL and embed synced lyrics |
+| `download` | Download `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` pairs through spotDL and rewrite their ID3 metadata |
 | `delete` | Remove selected ID3 frames recursively |
 
 The Cargo package and executable are currently named `music-tag-transfer`.
@@ -19,7 +18,6 @@ Only download material you are permitted to keep.
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Global usage](#global-usage)
-- [Resolve track descriptions](#resolve-track-descriptions)
 - [Download exact-source pairs](#download-exact-source-pairs)
 - [Delete ID3 tags](#delete-id3-tags)
 - [Exit status](#exit-status)
@@ -33,8 +31,8 @@ The individual workflows have these additional requirements:
 
 | Workflow | Additional requirements |
 |---|---|
-| `resolve` | A Spotify developer app and its Client ID/Client Secret |
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
+| Copyright lookup | A Spotify developer app and its Client ID/Client Secret |
 | Synced lyrics | Nothing extra; the SYLT frames are written by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
@@ -80,7 +78,7 @@ During development, every example below can instead begin with
 `cargo run --`. For example:
 
 ```bash
-cargo run -- resolve tracks.txt spotify-links.txt
+cargo run -- download pairs.txt
 ```
 
 ## Quick start
@@ -102,66 +100,26 @@ write those pairs yourself.
    music-tag-transfer download pairs.txt --output ./music
    ```
 
-Every pair is downloaded as MP3 with synchronised lyrics, and each generated
-`.lrc` file is rewritten into an ID3v2.3 `SYLT` frame and then deleted.
+Every pair is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
+tag is then rewritten: the `POPM` rating frame is removed, the `TCOP` copyright
+message is fetched from Spotify, and the generated `.lrc` file becomes a `SYLT`
+frame and is deleted.
 
-### Finding the Spotify half with `resolve`
+The copyright lookup needs a Spotify app's Client ID and Client Secret. Export
+them, and the run will not stop to ask:
 
-`resolve` turns free-text descriptions into Spotify track URLs. Its output is
-the right-hand half of each pair; add the YouTube Music URL and a `|` in front
-of each line before downloading.
+```bash
+export SPOTIFY_CLIENT_ID='your-client-id'
+export SPOTIFY_CLIENT_SECRET='your-client-secret'
+```
 
-1. Create `tracks.txt` with one search description per line:
-
-   ```text
-   Queen - Bohemian Rhapsody
-   Daft Punk Get Lucky
-   Adele, 21, Rolling in the Deep
-   ```
-
-2. Create an app in the
-   [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and
-   expose its credentials to the process.
-
-   Linux/macOS:
-
-   ```bash
-   export SPOTIFY_CLIENT_ID='your-client-id'
-   export SPOTIFY_CLIENT_SECRET='your-client-secret'
-   ```
-
-   PowerShell:
-
-   ```powershell
-   $env:SPOTIFY_CLIENT_ID = 'your-client-id'
-   $env:SPOTIFY_CLIENT_SECRET = 'your-client-secret'
-   ```
-
-3. Resolve the descriptions:
-
-   ```bash
-   music-tag-transfer resolve tracks.txt spotify-links.txt
-   ```
-
-4. Put the YouTube Music URL you want as the audio source in front of each
-   resolved line, separated by `|`, and save the result as `pairs.txt`:
-
-   ```text
-   https://music.youtube.com/watch?v=fJ9rUzIMcZQ|https://open.spotify.com/track/3z8h0TU7ReDPLIbEnYhWZb
-   ```
-
-   ```bash
-   music-tag-transfer download pairs.txt --output ./music
-   ```
-
-The resolver writes missing tracks and request failures as comments, and the
-downloader ignores comments, so those lines can stay in the file.
+Otherwise the command prompts for both before downloading anything. Pass
+`--no-copyright` to skip the lookup entirely.
 
 ## Global usage
 
 ```text
 music-tag-transfer download [OPTIONS] <INPUT_FILE>
-music-tag-transfer resolve <INPUT_FILE> <OUTPUT_FILE>
 music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
 ```
 
@@ -172,66 +130,11 @@ Global flags:
 | `-h`, `--help`, `help` | Print the top-level help |
 | `-V`, `--version` | Print the package name and version |
 
-`download --help` and `resolve --help` print command-specific help.
+`download --help` prints command-specific help.
 
 Paths containing spaces must be quoted. The download command expands `~` in
 its input, output, and token-file paths. Other commands receive paths exactly
 as the shell supplies them.
-
-## Resolve track descriptions
-
-### Syntax
-
-```text
-music-tag-transfer resolve <INPUT_FILE> <OUTPUT_FILE>
-```
-
-Required environment variables:
-
-| Variable | Purpose |
-|---|---|
-| `SPOTIFY_CLIENT_ID` | Client ID of a Spotify developer app |
-| `SPOTIFY_CLIENT_SECRET` | Client Secret of the same app |
-
-Both variables must be non-empty. The command uses Spotify's Client
-Credentials flow; it does not need a user access token.
-
-### Input format
-
-`INPUT_FILE` must be UTF-8 text. Each non-empty line that does not begin with
-`#` is used as a Spotify track search:
-
-```text
-# Comments are preserved
-artist:"Massive Attack" track:"Teardrop"
-Nujabes Feather
-
-Daft Punk - Get Lucky
-```
-
-The entire line is sent as the search query. Spotify's first track result is
-selected, so more specific artist/title queries reduce ambiguity.
-
-### Output and behavior
-
-The output keeps the same line order:
-
-- a resolved query becomes its `https://open.spotify.com/track/...` URL;
-- an empty line remains empty;
-- an input comment remains a comment;
-- no result becomes `# NOT FOUND: original query`;
-- a per-line request failure becomes `# ERROR (...): original query`.
-
-The output file's parent directory must already exist. Existing output files
-are replaced.
-
-Requests use a 15-second timeout and pause briefly between searches. HTTP 429
-responses are retried up to five times after the first request. A
-`Retry-After` value above 300 seconds is rejected instead of causing a long
-silent wait.
-
-No-result lines are reported but do not make the command fail. Authentication,
-input/output, or per-line request errors produce exit status 1.
 
 ## Download exact-source pairs
 
@@ -283,6 +186,7 @@ and stops before starting spotDL.
 | `--token-file <FILE>` | Official mode: read the access token from a file |
 | `--non-interactive` | Never prompt for Deno or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
+| `--no-copyright` | Skip the Spotify copyright lookup instead of asking for credentials |
 | `--max-attempts <N>` | Network attempts per pair; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 | `-h, --help` | Print download help |
@@ -325,13 +229,45 @@ handled here instead), and spotDL's output template:
 Because `--overwrite force` is used, rerunning an input file re-downloads
 every pair in it rather than skipping finished files.
 
+### Rating and copyright frames
+
+spotDL writes a `POPM` popularimeter frame from Spotify's popularity score —
+the frame most taggers display as the track's rating — and leaves the `TCOP`
+copyright message empty, because a single-track fetch does not carry the
+album's copyright.
+
+After each download this program fixes both:
+
+- the `POPM` frame is removed outright;
+- the `TCOP` frame is set to the copyright message fetched from Spotify.
+
+Copyright exists only on Spotify's album object, so a lookup is a track request
+followed by an album request. Albums are cached, so a whole album's worth of
+pairs costs one album request. When an album lists both a `C` copyright and a
+`P` phonogram entry, the `C` entry wins; when Spotify lists no copyright at
+all, the frame is left alone and the run says so.
+
+The lookup uses the client-credentials flow and needs a Spotify developer app:
+
+| Variable | Purpose |
+|---|---|
+| `SPOTIFY_CLIENT_ID` | Client ID of a Spotify developer app |
+| `SPOTIFY_CLIENT_SECRET` | Client Secret of the same app |
+
+If either is missing, the command prompts for it before downloading anything,
+so a long run never stops halfway to ask. The values are used only for that run
+and are never written to disk. With `--non-interactive` there is nothing to
+prompt, so the command stops and names the two variables. `--no-copyright`
+skips the lookup and the `TCOP` frame entirely.
+
 ### Synchronised lyrics as an ID3 `SYLT` frame
 
 spotDL does not write synchronised lyrics into the tag. `--lyrics synced` only
 embeds the plain text in a `USLT` frame, which has no timestamps, and
 `--generate-lrc` leaves the timed lyrics in a separate `.lrc` file.
 
-After each successful download this program closes that gap:
+After each successful download this program closes that gap, in the same tag
+write as the rating and copyright changes above:
 
 1. Every `.lrc` file below the output directory is parsed. `[mm:ss.xx]`,
    `[mm:ss]`, and `[hh:mm:ss.xxx]` timestamps are converted to milliseconds,
@@ -351,11 +287,15 @@ specification and makes strict parsers such as mutagen discard the whole
 frame.
 
 If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
-never the thing that gets lost, and the pair it belongs to is reported as
-failed so it appears in the retry list. Common causes are a `.lrc` file with
-no timestamped line at all and a `.lrc` file with no audio file next to it.
-A pair for which spotDL generated no `.lrc` file is reported but not failed:
-there were no synced lyrics to embed.
+never the thing that gets lost, nothing is written to the audio file, and the
+pair it belongs to is reported as failed so it appears in the retry list. The
+usual cause is a `.lrc` file with no timestamped line at all. A pair for which
+spotDL generated no `.lrc` file is not a failure: the rating and copyright
+changes are still applied, and there were simply no synced lyrics to embed.
+
+Downloaded files are matched back to their input pair through the Spotify track
+ID in the forced `[{track-id}]` output template, which is also what the
+copyright lookup uses.
 
 ### Download execution and output files
 
@@ -499,12 +439,11 @@ same scan and reports the expected counts without writing files.
 | Status | Meaning |
 |---|---|
 | `0` | Help/version succeeded, or the requested operation completed without processing errors |
-| `1` | Invalid arguments, setup/input/output failure, download failures, resolver request errors, or per-file metadata errors |
+| `1` | Invalid arguments, setup/input/output failure, download failures, or per-file metadata errors |
 
-For `resolve`, a valid query with no Spotify result is not an error. For
-`download`, any failed or unattempted pair results in status 1 and is preserved
-in `output.txt`. A pair whose audio downloaded but whose synced lyrics could
-not be embedded counts as failed, and its `.lrc` file is kept.
+Any failed or unattempted pair results in status 1 and is preserved in
+`output.txt`. A pair whose audio downloaded but whose metadata could not be
+finished counts as failed, and its `.lrc` file is kept.
 
 ## Troubleshooting
 
@@ -519,12 +458,12 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 `load_config`, or clear the official-API settings named in the error. Use
 `--official-api` only when that mode is intentional.
 
-### Spotify resolver authentication fails
+### Spotify authentication for copyright fails
 
 Confirm `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` belong to the same
 Spotify developer app. These are app credentials and are different from
 `SPOTIFY_AUTH_TOKEN`, which is used only by the downloader's optional
-official mode.
+official mode. Run with `--no-copyright` to download without them.
 
 ### A download needs Deno
 
@@ -581,26 +520,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Synced lyrics can be embedded on their own, for a folder that already contains
-`.lrc` files:
+The same metadata rules can be applied to a single file that already has a
+`.lrc` sidecar next to it:
 
 ```rust
-use std::{collections::HashSet, path::Path};
-use music_tag_transfer::embed_synced_lyrics;
+use std::path::Path;
+use music_tag_transfer::finalize;
 
-fn main() -> Result<(), String> {
-    let report = embed_synced_lyrics(Path::new("/path/to/music"), &HashSet::new())?;
-    println!("Embedded {} file(s)", report.files_embedded);
+fn main() {
+    let report = finalize(Path::new("/path/to/Artist - Song [id].mp3"), Some("2013 Some Label"));
+    println!(
+        "Removed {} rating frame(s), embedded {} line(s)",
+        report.ratings_removed, report.lines_embedded
+    );
     for failure in &report.failures {
         eprintln!("{}: {}", failure.path.display(), failure.message);
     }
-    Ok(())
 }
 ```
 
-`DeleteReport`, `LyricsReport`, `FileError`, and `TagSpec` are also exported.
-The `cli`, `download`, `lyrics`, and `resolve` modules expose the executable's
-command configuration and entry points.
+`DeleteReport`, `MetadataReport`, `FileError`, and `TagSpec` are also exported.
+The `cli`, `download`, `metadata`, and `spotify` modules expose the
+executable's command configuration and entry points.
 
 ## Development
 

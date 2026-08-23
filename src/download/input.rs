@@ -13,6 +13,9 @@ pub(super) const PAIR_SEPARATOR: char = '|';
 pub(super) struct Entry {
     pub(super) line: usize,
     pub(super) query: String,
+    /// The Spotify track ID from the right-hand side of the pair. It ties the
+    /// downloaded file back to this entry and drives the copyright lookup.
+    pub(super) track_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,11 +44,12 @@ fn parse(contents: &str) -> Result<InputList, String> {
         }
 
         match normalize_pair(line) {
-            Ok(query) => {
-                if seen.insert(query.clone()) {
+            Ok(pair) => {
+                if seen.insert(pair.query.clone()) {
                     entries.push(Entry {
                         line: line_number,
-                        query,
+                        query: pair.query,
+                        track_id: pair.track_id,
                     });
                 } else {
                     duplicate_count += 1;
@@ -82,8 +86,14 @@ fn parse(contents: &str) -> Result<InputList, String> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Pair {
+    query: String,
+    track_id: String,
+}
+
 /// Validate one `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` line.
-fn normalize_pair(raw: &str) -> Result<String, String> {
+fn normalize_pair(raw: &str) -> Result<Pair, String> {
     let separators = raw.matches(PAIR_SEPARATOR).count();
     if separators == 0 {
         return Err(
@@ -100,8 +110,11 @@ fn normalize_pair(raw: &str) -> Result<String, String> {
         .split_once(PAIR_SEPARATOR)
         .expect("a single separator was just counted");
     let youtube = normalize_youtube_url(youtube.trim())?;
-    let spotify = normalize_spotify_track_url(spotify.trim())?;
-    Ok(format!("{youtube}{PAIR_SEPARATOR}{spotify}"))
+    let track_id = spotify_track_id(spotify.trim())?;
+    Ok(Pair {
+        query: format!("{youtube}{PAIR_SEPARATOR}https://open.spotify.com/track/{track_id}"),
+        track_id,
+    })
 }
 
 fn normalize_youtube_url(raw: &str) -> Result<String, String> {
@@ -147,7 +160,8 @@ fn normalize_youtube_url(raw: &str) -> Result<String, String> {
     }
 }
 
-fn normalize_spotify_track_url(raw: &str) -> Result<String, String> {
+/// Extract the track ID from the Spotify half of a pair.
+fn spotify_track_id(raw: &str) -> Result<String, String> {
     if raw.is_empty() {
         return Err("the Spotify track URL is missing after '|'".into());
     }
@@ -160,10 +174,7 @@ fn normalize_spotify_track_url(raw: &str) -> Result<String, String> {
         if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("track") {
             return Err("Spotify URI must look like spotify:track:ID".into());
         }
-        return Ok(format!(
-            "https://open.spotify.com/track/{}",
-            spotify_id(parts[2])?
-        ));
+        return Ok(spotify_id(parts[2])?.to_owned());
     }
 
     let (host, remainder) = split_url(raw, "expected a https://open.spotify.com/track/... URL")?;
@@ -193,10 +204,7 @@ fn normalize_spotify_track_url(raw: &str) -> Result<String, String> {
             parts[0].to_ascii_lowercase()
         ));
     }
-    Ok(format!(
-        "https://open.spotify.com/track/{}",
-        spotify_id(parts[1])?
-    ))
+    Ok(spotify_id(parts[1])?.to_owned())
 }
 
 fn split_url<'a>(value: &'a str, expectation: &str) -> Result<(&'a str, &'a str), String> {
@@ -265,29 +273,30 @@ mod tests {
 
     const PAIR: &str = "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW";
 
+    fn query_of_pair(raw: &str) -> String {
+        normalize_pair(raw).unwrap().query
+    }
+
     #[test]
     fn keeps_the_exact_source_pair_and_strips_tracking_parameters() {
-        let normalized = normalize_pair(
+        let pair = normalize_pair(
             "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDAMVM&si=x|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW?utm_source=openai",
         )
         .unwrap();
-        assert_eq!(normalized, PAIR);
+        assert_eq!(pair.query, PAIR);
+        assert_eq!(pair.track_id, "02Q0SXOsk74oV4hesiL6JW");
     }
 
     #[test]
     fn accepts_the_other_youtube_hosts_and_spotify_uris() {
         assert_eq!(
-            normalize_pair(
-                "https://youtu.be/dQw4w9WgXcQ?t=30|spotify:track:02Q0SXOsk74oV4hesiL6JW"
-            )
-            .unwrap(),
+            query_of_pair("https://youtu.be/dQw4w9WgXcQ?t=30|spotify:track:02Q0SXOsk74oV4hesiL6JW"),
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
         );
         assert_eq!(
-            normalize_pair(
+            query_of_pair(
                 "http://m.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/intl-fr/track/02Q0SXOsk74oV4hesiL6JW"
-            )
-            .unwrap(),
+            ),
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
         );
     }
@@ -343,5 +352,6 @@ mod tests {
         assert_eq!(parsed.duplicate_count, 1);
         assert_eq!(parsed.entries[0].line, 3);
         assert_eq!(parsed.entries[0].query, PAIR);
+        assert_eq!(parsed.entries[0].track_id, "02Q0SXOsk74oV4hesiL6JW");
     }
 }

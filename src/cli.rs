@@ -2,7 +2,6 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
-use crate::resolve;
 
 pub const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -14,20 +13,13 @@ USAGE:
     " download [OPTIONS] <INPUT_FILE>
     ",
     env!("CARGO_PKG_NAME"),
-    " resolve <INPUT_FILE> <OUTPUT_FILE>
-    ",
-    env!("CARGO_PKG_NAME"),
     " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
 
 COMMANDS:
-    resolve     Convert free-text track descriptions into Spotify URLs
     download    Download YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pairs through spotDL
     delete      Remove selected ID3 tags from a folder recursively
 
 EXAMPLES:
-    ",
-    env!("CARGO_PKG_NAME"),
-    " resolve tracks.txt spotify-links.txt
     ",
     env!("CARGO_PKG_NAME"),
     " download pairs.txt --output ~/Documents/Music
@@ -36,8 +28,9 @@ EXAMPLES:
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
 
 The download command reads one YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per
-line, forces MP3 with synced lyrics, and rewrites each generated .lrc file into
-an ID3v2.3 SYLT frame before deleting it.
+line and forces MP3 with synced lyrics. It then rewrites each file's ID3v2.3
+tag: the POPM rating frame is removed, the TCOP copyright message is fetched
+from Spotify, and the generated .lrc file becomes a SYLT frame.
 
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.
@@ -45,9 +38,7 @@ Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.
 
 Run `",
     env!("CARGO_PKG_NAME"),
-    " download --help` or `",
-    env!("CARGO_PKG_NAME"),
-    " resolve --help` for command-specific help.
+    " download --help` for command-specific help.
 "
 );
 
@@ -55,8 +46,6 @@ Run `",
 pub enum Command {
     Download(download_cli::Config),
     DownloadHelp,
-    Resolve(resolve::Config),
-    ResolveHelp,
     Delete {
         folder: PathBuf,
         tags: Vec<TagSpec>,
@@ -79,37 +68,9 @@ where
         "-h" | "--help" | "help" => Ok(Command::Help),
         "-V" | "--version" => Ok(Command::Version),
         "download" => parse_download(&args[1..]),
-        "resolve" => parse_resolve(&args[1..]),
         "delete" => parse_delete(&args[1..]),
         _ => Err(format!("unknown command {command:?}")),
     }
-}
-
-fn parse_resolve(args: &[OsString]) -> Result<Command, String> {
-    if args.len() == 1 {
-        match args[0].to_str() {
-            Some("-h" | "--help") => return Ok(Command::ResolveHelp),
-            Some("-V" | "--version") => return Ok(Command::Version),
-            _ => {}
-        }
-    }
-    if args.len() != 2 {
-        return Err("resolve requires an input file and an output file".to_owned());
-    }
-    if let Some(option) = args
-        .iter()
-        .find(|argument| argument.to_string_lossy().starts_with('-'))
-    {
-        return Err(format!(
-            "unknown resolve option {:?}",
-            option.to_string_lossy()
-        ));
-    }
-
-    Ok(Command::Resolve(resolve::Config {
-        input: PathBuf::from(&args[0]),
-        output: PathBuf::from(&args[1]),
-    }))
 }
 
 fn parse_download(args: &[OsString]) -> Result<Command, String> {
@@ -250,7 +211,7 @@ mod tests {
     fn delegates_download_options() {
         let command = parse_args(strings(&[
             "download",
-            "spotify-links.txt",
+            "pairs.txt",
             "--output",
             "downloads",
             "--non-interactive",
@@ -260,7 +221,7 @@ mod tests {
         let Command::Download(config) = command else {
             panic!("expected the download command");
         };
-        assert_eq!(config.input, PathBuf::from("spotify-links.txt"));
+        assert_eq!(config.input, PathBuf::from("pairs.txt"));
         assert_eq!(config.output, PathBuf::from("downloads"));
         assert!(config.non_interactive);
     }
@@ -270,25 +231,6 @@ mod tests {
         assert_eq!(
             parse_args(strings(&["download", "--help"])).unwrap(),
             Command::DownloadHelp
-        );
-    }
-
-    #[test]
-    fn parses_resolve_pipeline() {
-        assert_eq!(
-            parse_args(strings(&["resolve", "tracks.txt", "spotify-links.txt"])).unwrap(),
-            Command::Resolve(resolve::Config {
-                input: PathBuf::from("tracks.txt"),
-                output: PathBuf::from("spotify-links.txt"),
-            })
-        );
-    }
-
-    #[test]
-    fn delegates_resolve_help() {
-        assert_eq!(
-            parse_args(strings(&["resolve", "--help"])).unwrap(),
-            Command::ResolveHelp
         );
     }
 }

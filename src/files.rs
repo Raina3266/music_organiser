@@ -20,18 +20,26 @@ pub(crate) fn music_files_recursively(root: &Path) -> io::Result<Vec<PathBuf>> {
     files_recursively(root, MUSIC_EXTENSIONS)
 }
 
-pub(crate) fn lyrics_files_recursively(root: &Path) -> io::Result<Vec<PathBuf>> {
-    files_recursively(root, &[LYRICS_EXTENSION])
+/// The `.lrc` sidecar sitting next to an audio file, if spotDL wrote one.
+pub(crate) fn sibling_lyrics_file(audio: &Path) -> Option<PathBuf> {
+    let candidate = audio.with_extension(LYRICS_EXTENSION);
+    candidate.is_file().then_some(candidate)
 }
 
-/// The audio file a sidecar such as `Song.lrc` belongs to, if one exists.
+/// The audio files spotDL wrote for one Spotify track.
 ///
-/// `.mp3` is tried first because the download command forces that format.
-pub(crate) fn sibling_music_file(path: &Path) -> Option<PathBuf> {
-    MUSIC_EXTENSIONS
-        .iter()
-        .map(|extension| path.with_extension(extension))
-        .find(|candidate| candidate.is_file())
+/// The download command forces spotDL's `[{track-id}]` output template, so the
+/// track ID in the file name is what ties a file back to its input pair.
+pub(crate) fn music_files_for_track(root: &Path, track_id: &str) -> io::Result<Vec<PathBuf>> {
+    let suffix = format!("[{track_id}]");
+    Ok(music_files_recursively(root)?
+        .into_iter()
+        .filter(|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| stem.ends_with(&suffix))
+        })
+        .collect())
 }
 
 fn files_recursively(root: &Path, extensions: &[&str]) -> io::Result<Vec<PathBuf>> {

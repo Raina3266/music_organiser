@@ -11,6 +11,8 @@ pub struct Config {
     pub token_file: Option<PathBuf>,
     pub non_interactive: bool,
     pub auto_download_deno: bool,
+    /// Skip the Spotify copyright lookup instead of asking for credentials.
+    pub no_copyright: bool,
     pub max_attempts: u32,
     pub max_rate_limit_wait: u64,
 }
@@ -35,6 +37,7 @@ where
     let mut token_file = None;
     let mut non_interactive = false;
     let mut auto_download_deno = false;
+    let mut no_copyright = false;
     let mut max_attempts = 3;
     let mut max_rate_limit_wait = 300;
 
@@ -47,6 +50,7 @@ where
             "--official-api" => official_api = true,
             "--non-interactive" => non_interactive = true,
             "--auto-download-deno" => auto_download_deno = true,
+            "--no-copyright" => no_copyright = true,
             "-o" | "--output" => {
                 output = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
             }
@@ -120,6 +124,7 @@ where
         token_file,
         non_interactive,
         auto_download_deno,
+        no_copyright,
         max_attempts,
         max_rate_limit_wait,
     }))
@@ -197,6 +202,7 @@ OPTIONS:
         --token-file <FILE>           Official mode: read an access token from a file
         --non-interactive             Never prompt for Deno or an expired official token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
+        --no-copyright                Skip the Spotify copyright lookup entirely
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
     -h, --help                        Print help
@@ -213,6 +219,15 @@ INPUT FORMAT:
         spotdl download \"PAIR\" --overwrite force --format mp3 \\
               --lyrics synced --generate-lrc
 
+METADATA:
+    After each download the ID3v2.3 tag is rewritten: the POPM rating frame
+    spotDL writes from Spotify's popularity score is removed, and the TCOP
+    copyright message is fetched from the Spotify Web API and stored.
+
+    The lookup needs a Spotify app's Client ID and Client Secret. They are read
+    from SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET, or typed in at the start
+    of the run. Use --no-copyright to skip the lookup.
+
 SYNCED LYRICS:
     spotDL embeds only untimed USLT lyrics, so every generated .lrc file is
     parsed into an ID3v2.3 SYLT frame with millisecond timestamps. The USLT
@@ -226,6 +241,8 @@ SPOTIFY MODE:
 
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path
+    SPOTIFY_CLIENT_ID                 Spotify app client ID, for copyright
+    SPOTIFY_CLIENT_SECRET             Spotify app client secret, for copyright
 
 Blank lines and lines beginning with # are ignored.",
         package = env!("CARGO_PKG_NAME")
