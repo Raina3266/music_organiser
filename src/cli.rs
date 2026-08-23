@@ -21,7 +21,7 @@ USAGE:
 
 COMMANDS:
     resolve     Convert free-text track descriptions into Spotify URLs
-    download    Download Spotify links from a text file through spotDL
+    download    Download exact YouTube Music/Spotify track pairs through spotDL
     delete      Remove selected ID3 tags from a folder recursively
 
 EXAMPLES:
@@ -30,7 +30,7 @@ EXAMPLES:
     " resolve tracks.txt spotify-links.txt
     ",
     env!("CARGO_PKG_NAME"),
-    " download spotify-links.txt --output ~/Documents/Music
+    " download track-pairs.txt --output ~/Documents/Music
     ",
     env!("CARGO_PKG_NAME"),
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
@@ -246,7 +246,7 @@ mod tests {
     fn delegates_download_options() {
         let command = parse_args(strings(&[
             "download",
-            "spotify-links.txt",
+            "track-pairs.txt",
             "--output",
             "downloads",
             "--non-interactive",
@@ -256,7 +256,7 @@ mod tests {
         let Command::Download(config) = command else {
             panic!("expected the download command");
         };
-        assert_eq!(config.input, PathBuf::from("spotify-links.txt"));
+        assert_eq!(config.input, PathBuf::from("track-pairs.txt"));
         assert_eq!(config.output, PathBuf::from("downloads"));
         assert!(config.non_interactive);
     }

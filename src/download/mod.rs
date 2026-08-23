@@ -1,5 +1,6 @@
 pub mod cli;
 mod input;
+mod lyrics;
 mod output;
 mod spotdl;
 mod token;
@@ -17,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
-/// Download every unique Spotify link in `config.input` through spotDL.
+/// Download every unique YouTube Music/Spotify track pair in `config.input` through spotDL.
 ///
 /// A return value of `0` means every entry completed; `1` means a retry list
 /// was written for failed or unattempted entries.
@@ -53,12 +54,12 @@ pub fn run(config: Config) -> Result<i32, String> {
         ));
     }
     println!(
-        "Loaded {} unique Spotify link(s) from {}.",
+        "Loaded {} unique YouTube Music/Spotify pair(s) from {}.",
         input.entries.len(),
         config.input.display()
     );
     if input.duplicate_count > 0 {
-        println!("Ignored {} duplicate link(s).", input.duplicate_count);
+        println!("Ignored {} duplicate pair(s).", input.duplicate_count);
     }
     println!("Downloads will be stored in {}.", config.output.display());
     if config.official_api {
@@ -79,7 +80,12 @@ pub fn run(config: Config) -> Result<i32, String> {
     let mut deno_install_attempted = false;
 
     for (index, entry) in input.entries.iter().enumerate() {
-        println!("\n[{}/{}] Downloading {}", index + 1, total, entry.url);
+        println!(
+            "\n[{}/{}] Downloading {}",
+            index + 1,
+            total,
+            entry.query
+        );
         match download_entry(
             &config,
             entry,
@@ -111,7 +117,7 @@ pub fn run(config: Config) -> Result<i32, String> {
         println!("Not attempted: {remaining}");
         println!("Reason for stopping: {}", stop.reason);
         println!(
-            "Rerun the same command after fixing the reported problem; existing files will be skipped."
+            "Rerun the same command after fixing the reported problem; each attempted pair is downloaded with --overwrite force."
         );
     }
 
@@ -124,7 +130,7 @@ pub fn run(config: Config) -> Result<i32, String> {
         failures.iter().map(|failure| failure.url.as_str()).chain(
             input.entries[pending_start..]
                 .iter()
-                .map(|entry| entry.url.as_str()),
+                .map(|entry| entry.query.as_str()),
         ),
     )?;
     println!("Retry URL list: {}", failed_urls_path.display());
@@ -174,12 +180,27 @@ fn download_entry(
         let result = spotdl::download(
             &config.spotdl,
             &config.output,
-            &entry.url,
+            &entry.query,
             config.official_api,
             auth_token.as_deref(),
         )?;
         match spotdl::classify(&result) {
-            Classification::Success => return Ok(EntryOutcome::Completed),
+            Classification::Success => {
+                return match lyrics::embed_generated_lrc(
+                    &config.output,
+                    &entry.spotify_track_id,
+                ) {
+                    Ok(lines) => {
+                        println!(
+                            "Embedded {lines} synchronized lyric line(s) in ID3 SYLT and removed the generated LRC file."
+                        );
+                        Ok(EntryOutcome::Completed)
+                    }
+                    Err(reason) => Ok(EntryOutcome::Failed(format!(
+                        "audio downloaded, but synchronized-lyrics post-processing failed: {reason}"
+                    ))),
+                };
+            }
             Classification::PremiumRequired => {
                 return Ok(EntryOutcome::Abort(
                     "Spotify returned 403: the official API app owner needs an active Premium subscription. A replacement token from the same app will not fix this; rerun without --official-api to use token-free mode."
@@ -282,7 +303,7 @@ fn download_entry(
                         "spotDL could not install Deno ({status}). Run `spotdl --download-deno` manually or install Deno system-wide, then rerun this command."
                     )));
                 }
-                eprintln!("Deno setup completed; retrying the current Spotify link.");
+                eprintln!("Deno setup completed; retrying the current track pair.");
                 network_attempt = 1;
             }
             Classification::Network => {
@@ -302,7 +323,7 @@ fn download_entry(
             }
             Classification::NotFound => {
                 return Ok(EntryOutcome::Failed(
-                    "spotDL could not find downloadable audio for this Spotify link".into(),
+                    "spotDL could not download audio for this track pair".into(),
                 ));
             }
             Classification::Failed => {
@@ -401,7 +422,7 @@ impl Failure {
     fn new(entry: &Entry, reason: String) -> Self {
         Self {
             line: entry.line,
-            url: entry.url.clone(),
+            url: entry.query.clone(),
             reason,
         }
     }

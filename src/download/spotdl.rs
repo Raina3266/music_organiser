@@ -162,15 +162,20 @@ fn download_command(
         }
     }
     command
+        .arg("download")
+        .arg(url)
         .arg("--overwrite")
-        .arg("skip")
+        .arg("force")
+        .arg("--format")
+        .arg("mp3")
+        .arg("--lyrics")
+        .arg("synced")
+        .arg("--generate-lrc")
         .arg("--print-errors")
         .arg("--max-retries")
         .arg("0")
         .arg("--output")
         .arg(OUTPUT_TEMPLATE)
-        .arg("download")
-        .arg(url)
         .current_dir(output_dir);
     command
 }
@@ -479,7 +484,7 @@ mod tests {
         let command = download_command(
             "spotdl",
             Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
+            "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123",
             false,
             None,
         );
@@ -490,6 +495,19 @@ mod tests {
         assert!(!args.iter().any(|argument| argument == "--use-official-api"));
         assert!(!args.iter().any(|argument| argument == "--auth-token"));
         assert!(!args.iter().any(|argument| argument == "--use-cache-file"));
+        assert!(
+            args.windows(2)
+                .any(|args| args[0] == "--overwrite" && args[1] == "force")
+        );
+        assert!(
+            args.windows(2)
+                .any(|args| args[0] == "--format" && args[1] == "mp3")
+        );
+        assert!(
+            args.windows(2)
+                .any(|args| args[0] == "--lyrics" && args[1] == "synced")
+        );
+        assert!(args.iter().any(|argument| argument == "--generate-lrc"));
     }
 
     #[test]
@@ -497,7 +515,7 @@ mod tests {
         let command = download_command(
             "spotdl",
             Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
+            "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123",
             true,
             Some("secret-token"),
         );
@@ -516,7 +534,7 @@ mod tests {
         let command = download_command(
             "./tools/spotdl",
             Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
+            "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123",
             false,
             None,
         );

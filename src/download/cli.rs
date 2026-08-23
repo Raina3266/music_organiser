@@ -184,7 +184,7 @@ fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
 
 pub fn help_text() -> String {
     format!(
-        "{package} download - download one Spotify link per line through spotDL
+        "{package} download - download exact YouTube Music/Spotify track pairs through spotDL
 
 USAGE:
     {package} download [OPTIONS] <INPUT_FILE>
@@ -209,7 +209,10 @@ SPOTIFY MODE:
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path
 
-Blank lines and lines beginning with # are ignored.",
+INPUT:
+    One YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per line. Blank lines and
+    lines beginning with # are ignored. Every successful download is forced to
+    MP3, receives synchronized ID3 SYLT lyrics, and has its generated LRC removed.",
         package = env!("CARGO_PKG_NAME")
     )
 }

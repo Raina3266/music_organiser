@@ -102,6 +102,10 @@ pub const SUPPORTED_TAGS: &[TagSpec] = &[
         frame_id: "USLT",
     },
     TagSpec {
+        name: "Synced Lyrics",
+        frame_id: "SYLT",
+    },
+    TagSpec {
         name: "Lyricist",
         frame_id: "TEXT",
     },

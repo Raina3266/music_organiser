@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub(super) line: usize,
-    pub(super) url: String,
+    pub(super) query: String,
+    pub(super) spotify_track_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +23,7 @@ pub(super) fn load(path: &Path) -> Result<InputList, String> {
 
 fn parse(contents: &str) -> Result<InputList, String> {
     let mut entries = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let mut duplicate_count = 0;
     let mut invalid = Vec::new();
 
@@ -33,15 +34,23 @@ fn parse(contents: &str) -> Result<InputList, String> {
             continue;
         }
 
-        match normalize_spotify_url(line) {
-            Ok(url) => {
-                if seen.insert(url.clone()) {
+        match normalize_pair(line) {
+            Ok((query, spotify_track_id)) => {
+                if let Some(previous_query) = seen.get(&spotify_track_id) {
+                    if previous_query == &query {
+                        duplicate_count += 1;
+                    } else {
+                        invalid.push(format!(
+                            "line {line_number}: Spotify track {spotify_track_id} is already mapped to a different YouTube Music URL"
+                        ));
+                    }
+                } else {
+                    seen.insert(spotify_track_id.clone(), query.clone());
                     entries.push(Entry {
                         line: line_number,
-                        url,
+                        query,
+                        spotify_track_id,
                     });
-                } else {
-                    duplicate_count += 1;
                 }
             }
             Err(reason) => invalid.push(format!("line {line_number}: {reason}")),
@@ -64,13 +73,81 @@ fn parse(contents: &str) -> Result<InputList, String> {
         return Err(format!("invalid input:\n{shown}{suffix}"));
     }
     if entries.is_empty() {
-        return Err("the input file contains no Spotify links".into());
+        return Err("the input file contains no YouTube Music/Spotify track pairs".into());
     }
 
     Ok(InputList {
         entries,
         duplicate_count,
     })
+}
+
+fn normalize_pair(raw: &str) -> Result<(String, String), String> {
+    let mut parts = raw.split('|');
+    let youtube = parts.next().unwrap_or_default();
+    let spotify = parts
+        .next()
+        .ok_or_else(|| "expected YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL".to_owned())?;
+    if parts.next().is_some() {
+        return Err("expected exactly one '|' separator".into());
+    }
+
+    let youtube = normalize_youtube_music_url(youtube)?;
+    let spotify = normalize_spotify_url(spotify)?;
+    let spotify_track_id = spotify
+        .strip_prefix("https://open.spotify.com/track/")
+        .ok_or_else(|| "the Spotify side must be an open.spotify.com track URL".to_owned())?
+        .to_owned();
+
+    Ok((format!("{youtube}|{spotify}"), spotify_track_id))
+}
+
+fn normalize_youtube_music_url(raw: &str) -> Result<String, String> {
+    let value = raw.trim();
+    if value.chars().any(char::is_whitespace) {
+        return Err("YouTube Music URL contains whitespace".into());
+    }
+
+    let scheme_end = value
+        .find("://")
+        .ok_or_else(|| "expected an https://music.youtube.com/watch?v=... URL".to_owned())?;
+    let scheme = &value[..scheme_end];
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return Err("YouTube Music URL must use http or https".into());
+    }
+
+    let after_scheme = &value[scheme_end + 3..];
+    let host_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let host = &after_scheme[..host_end];
+    if !host.eq_ignore_ascii_case("music.youtube.com") {
+        return Err(format!("unsupported YouTube Music host: {host}"));
+    }
+
+    let remainder = after_scheme[host_end..]
+        .split('#')
+        .next()
+        .unwrap_or_default();
+    let (path, query) = remainder
+        .split_once('?')
+        .ok_or_else(|| "YouTube Music URL is missing its video ID".to_owned())?;
+    if path.trim_matches('/') != "watch" {
+        return Err("YouTube Music URL must point to /watch".into());
+    }
+    let video_id = query
+        .split('&')
+        .find_map(|parameter| parameter.strip_prefix("v="))
+        .ok_or_else(|| "YouTube Music URL is missing its v parameter".to_owned())?;
+    if video_id.len() != 11
+        || !video_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("YouTube Music video ID is malformed".into());
+    }
+
+    Ok(format!("https://music.youtube.com/watch?v={video_id}"))
 }
 
 fn normalize_spotify_url(raw: &str) -> Result<String, String> {
@@ -165,7 +242,7 @@ fn normalize_spotify_uri(value: &str) -> Result<String, String> {
     {
         return Err("Spotify content ID is malformed".into());
     }
-    Ok(format!("spotify:{kind}:{}", parts[2]))
+    Ok(format!("https://open.spotify.com/{kind}/{}", parts[2]))
 }
 
 fn before_query_or_fragment(value: &str) -> &str {
@@ -183,7 +260,7 @@ fn is_supported_kind(kind: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_spotify_url, parse};
+    use super::{normalize_pair, normalize_spotify_url, parse};
 
     #[test]
     fn strips_tracking_parameters() {
@@ -213,7 +290,7 @@ mod tests {
     fn accepts_spotify_uris_and_short_links() {
         assert_eq!(
             normalize_spotify_url("spotify:track:abc123").unwrap(),
-            "spotify:track:abc123"
+            "https://open.spotify.com/track/abc123"
         );
         assert_eq!(
             normalize_spotify_url("https://spotify.link/AbCdEf?si=123").unwrap(),
@@ -228,10 +305,38 @@ mod tests {
 
     #[test]
     fn ignores_comments_blanks_and_duplicates() {
-        let input = "\n# comment\nhttps://open.spotify.com/track/abc123?si=1\nhttps://open.spotify.com/track/abc123?si=2\n";
+        let input = "\n# comment\nhttps://music.youtube.com/watch?v=abcdefghijk&si=one|https://open.spotify.com/track/abc123?si=1\nhttps://music.youtube.com/watch?v=abcdefghijk&si=two|https://open.spotify.com/track/abc123?si=2\n";
         let parsed = parse(input).unwrap();
         assert_eq!(parsed.entries.len(), 1);
         assert_eq!(parsed.duplicate_count, 1);
         assert_eq!(parsed.entries[0].line, 3);
+        assert_eq!(
+            parsed.entries[0].query,
+            "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123"
+        );
+        assert_eq!(parsed.entries[0].spotify_track_id, "abc123");
+    }
+
+    #[test]
+    fn requires_a_youtube_music_and_spotify_track_pair() {
+        assert!(normalize_pair("https://open.spotify.com/track/abc123").is_err());
+        assert!(
+            normalize_pair(
+                "https://www.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123"
+            )
+            .is_err()
+        );
+        assert!(
+            normalize_pair(
+                "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/album/abc123"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_sources_for_the_same_spotify_track() {
+        let input = "https://music.youtube.com/watch?v=abcdefghijk|https://open.spotify.com/track/abc123\nhttps://music.youtube.com/watch?v=lmnopqrstuv|https://open.spotify.com/track/abc123\n";
+        assert!(parse(input).is_err());
     }
 }
