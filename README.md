@@ -101,9 +101,9 @@ write those pairs yourself.
    ```
 
 Every pair is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
-tag is then rewritten: the `POPM` rating frame is removed, `TCOP` and `TLAN`
-are filled in, and the generated `.lrc` file becomes a `SYLT` frame and is
-deleted.
+tag is then rewritten: the `POPM` rating and `TSSE` encoder-settings frames are
+removed, `TCOP` and `TLAN` are filled in, and the generated `.lrc` file becomes
+a `SYLT` frame and is deleted.
 
 No credentials are needed for any of it. The copyright comes from the iTunes
 Search API, which is open to anyone.
@@ -250,19 +250,31 @@ Two caveats:
 - Existing downloads are not moved. Rerunning the same input file re-downloads
   them into the new layout, because `--overwrite force` is used.
 
-### Rating, copyright, and language frames
+### Rating, encoder, copyright, and language frames
 
-spotDL writes a `POPM` popularimeter frame from Spotify's popularity score —
-the frame most taggers display as the track's rating — and leaves `TCOP` empty,
-because a single-track fetch does not carry the album's copyright.
+A freshly downloaded file carries two frames that describe the download rather
+than the music: `POPM`, the popularimeter spotDL fills from Spotify's
+popularity score — the frame most taggers display as a rating — and `TSSE`, the
+encoder-settings string FFmpeg leaves behind (something like `Lavf58.76.100`).
+spotDL also leaves `TCOP` empty, because a single-track fetch does not carry
+the album's copyright.
 
-After each download this program rewrites three frames:
+After each download this program rewrites four frames:
 
 | Frame | What happens |
 |---|---|
 | `POPM` | Removed outright |
+| `TSSE` | Removed outright |
 | `TCOP` | Set to the copyright message looked up on iTunes |
 | `TLAN` | Set to the language detected from the lyrics, or `--language` |
+
+Removal happens after spotDL is finished with the file, so it catches whatever
+FFmpeg wrote during the transcode. Files downloaded before this existed can be
+cleaned up with the `delete` command:
+
+```bash
+music-tag-transfer delete "/path/to/music" "[Encoding Settings]"
+```
 
 `TSRC` is deliberately **not** touched. spotDL already fills the ISRC from its
 own metadata, and iTunes publishes no ISRCs, so whatever spotDL wrote is left

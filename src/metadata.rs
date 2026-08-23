@@ -1,7 +1,7 @@
 //! Rewrite the ID3 tag spotDL leaves behind.
 //!
-//! Each downloaded file gets one tag update that: drops the `POPM`
-//! popularimeter frame spotDL writes from Spotify's popularity score, sets the
+//! Each downloaded file gets one tag update that: drops the unwanted `POPM`
+//! rating and `TSSE` encoder-settings frames, sets the
 //! `TCOP` copyright message fetched from the iTunes Search API, records the
 //! `TLAN` language, and turns the `.lrc` sidecar into a `SYLT` frame while
 //! removing the untimed `USLT` one. The result is read back from disk before
@@ -25,8 +25,12 @@ use crate::lyrics::{detect_language, parse_lrc, sylt_frame, synchronised_lyrics}
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
 const TAG_VERSION: Version = Version::Id3v23;
-/// The popularimeter frame. spotDL fills it from Spotify's popularity score.
-const RATING_FRAME: &str = "POPM";
+/// Frames removed from every download.
+///
+/// `POPM` is the popularimeter spotDL fills from Spotify's popularity score —
+/// the frame taggers display as a rating. `TSSE` is the encoder-settings string
+/// FFmpeg leaves behind, which describes the transcode rather than the music.
+const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE"];
 /// The copyright message frame.
 const COPYRIGHT_FRAME: &str = "TCOP";
 /// The language frame, an ISO-639-2 code.
@@ -36,8 +40,8 @@ const LANGUAGE_FRAME: &str = "TLAN";
 pub struct MetadataReport {
     /// Audio files whose tag was rewritten.
     pub files_updated: usize,
-    /// `POPM` rating frames removed.
-    pub ratings_removed: usize,
+    /// Unwanted frames removed; see `STRIPPED_FRAMES`.
+    pub frames_stripped: usize,
     /// Files that received a `TCOP` copyright message.
     pub copyrights_written: usize,
     /// Files whose copyright lookup failed outright. The rest of the tag is
@@ -59,7 +63,7 @@ pub struct MetadataReport {
 impl MetadataReport {
     pub(crate) fn absorb(&mut self, other: MetadataReport) {
         self.files_updated += other.files_updated;
-        self.ratings_removed += other.ratings_removed;
+        self.frames_stripped += other.frames_stripped;
         self.copyrights_written += other.copyrights_written;
         self.copyright_lookups_failed += other.copyright_lookups_failed;
         self.languages_detected += other.languages_detected;
@@ -130,7 +134,10 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
         }
     }
 
-    let ratings_removed = tag.remove(RATING_FRAME).len();
+    let frames_stripped = STRIPPED_FRAMES
+        .iter()
+        .map(|frame_id| tag.remove(frame_id).len())
+        .sum::<usize>();
     let uslt_removed = tag.lyrics().count();
     set_text(&mut tag, COPYRIGHT_FRAME, copyright);
     set_text(&mut tag, LANGUAGE_FRAME, Some(language.as_str()));
@@ -169,7 +176,7 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
     }
 
     report.files_updated = 1;
-    report.ratings_removed = ratings_removed;
+    report.frames_stripped = frames_stripped;
     report.copyrights_written = usize::from(copyright.is_some());
     report.languages_detected = usize::from(detected);
     report
@@ -210,8 +217,11 @@ fn verify(
     let tag = Tag::read_from_path(audio)
         .map_err(|error| format!("cannot re-read the file to verify its tag: {error}"))?;
 
-    if tag.get(RATING_FRAME).is_some() {
-        return Err(format!("the {RATING_FRAME} rating frame is still present"));
+    if let Some(frame_id) = STRIPPED_FRAMES
+        .iter()
+        .find(|frame_id| tag.get(frame_id).is_some())
+    {
+        return Err(format!("the {frame_id} frame is still present"));
     }
 
     for (frame_id, expected, label) in [
@@ -291,6 +301,11 @@ mod tests {
             rating: 0,
             counter: 0,
         });
+        // FFmpeg's encoder-settings string, describing the transcode.
+        tag.add_frame(Frame::with_content(
+            "TSSE",
+            Content::Text("Lavf58.76.100".to_owned()),
+        ));
         tag.add_frame(id3::frame::Lyrics {
             lang: "eng".to_owned(),
             description: String::new(),
@@ -304,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_the_rating_fills_the_remote_tags_and_embeds_the_lyrics() {
+    fn strips_the_unwanted_frames_fills_the_copyright_and_embeds_the_lyrics() {
         let directory = TempDir::new("finalize");
         let audio = directory.0.join("Artist - Song [abc123].mp3");
         let sidecar = directory.0.join("Artist - Song [abc123].lrc");
@@ -318,7 +333,7 @@ mod tests {
         let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
-        assert_eq!(report.ratings_removed, 1);
+        assert_eq!(report.frames_stripped, 2);
         assert_eq!(report.copyrights_written, 1);
         assert_eq!(report.lyrics_embedded, 1);
         assert_eq!(report.lines_embedded, 2);
@@ -326,7 +341,8 @@ mod tests {
         assert!(!sidecar.exists());
 
         let tag = Tag::read_from_path(&audio).unwrap();
-        assert!(tag.get(RATING_FRAME).is_none());
+        assert!(tag.get("POPM").is_none());
+        assert!(tag.get("TSSE").is_none());
         assert_eq!(
             tag.get(COPYRIGHT_FRAME).and_then(|f| f.content().text()),
             Some("\u{2117} 2001 Daft Life Limited")
@@ -371,19 +387,20 @@ mod tests {
     }
 
     #[test]
-    fn a_track_without_a_sidecar_still_loses_its_rating() {
+    fn a_track_without_a_sidecar_still_loses_the_stripped_frames() {
         let directory = TempDir::new("norating");
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
         let report = finalize(&audio, None, "eng");
         assert_eq!(report.failures, Vec::new());
-        assert_eq!(report.ratings_removed, 1);
+        assert_eq!(report.frames_stripped, 2);
         assert_eq!(report.lyrics_embedded, 0);
         assert_eq!(report.copyrights_written, 0);
 
         let tag = Tag::read_from_path(&audio).unwrap();
-        assert!(tag.get(RATING_FRAME).is_none());
+        assert!(tag.get("POPM").is_none());
+        assert!(tag.get("TSSE").is_none());
         // Without synced lyrics to replace it, the untimed USLT frame stays.
         assert_eq!(tag.lyrics().count(), 1);
     }
@@ -400,9 +417,10 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
-        // Nothing was written, so the rating is still there to retry.
+        // Nothing was written, so the unwanted frames are still there to retry.
         let tag = Tag::read_from_path(&audio).unwrap();
-        assert!(tag.get(RATING_FRAME).is_some());
+        assert!(tag.get("POPM").is_some());
+        assert!(tag.get("TSSE").is_some());
     }
 
     #[test]

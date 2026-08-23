@@ -126,9 +126,9 @@ pub fn run(config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s).",
+        "Metadata: updated {} file(s); stripped {} rating/encoder frame(s); wrote {} copyright message(s).",
         metadata_totals.files_updated,
-        metadata_totals.ratings_removed,
+        metadata_totals.frames_stripped,
         metadata_totals.copyrights_written
     );
     if metadata_totals.copyright_lookups_failed > 0 {
@@ -266,8 +266,8 @@ fn apply_metadata(
             "taken from --language"
         };
         println!(
-            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
-            report.ratings_removed, report.copyrights_written
+            "Updated the tag: stripped {} rating/encoder frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
+            report.frames_stripped, report.copyrights_written
         );
     }
 

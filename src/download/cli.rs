@@ -256,6 +256,7 @@ METADATA:
 
         POPM   the rating frame spotDL writes from Spotify's popularity
                score is removed
+        TSSE   the encoder-settings string FFmpeg leaves behind is removed
         TCOP   the copyright message, looked up per album on the iTunes
                Search API, which needs no account, key, or token
         TLAN   the language, detected from the synced lyrics, falling back
