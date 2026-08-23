@@ -32,7 +32,7 @@ lyrics. A line is a Spotify URL, a YouTube Music URL, or a
 YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL exact-source pair, and one file may mix
 all three. It then rewrites each file's ID3v2.3 tag: the POPM rating frame is
 removed, the TCOP copyright message is looked up on iTunes, and the generated
-.lrc file becomes a SYLT frame.
+.lrc file is pasted into the ordinary USLT lyrics frame.
 
 Before the first download, an interactive run asks for a Spotify access token.
 Pasting one uses Spotify's official Web API, the only source for the ISRC

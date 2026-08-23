@@ -22,7 +22,7 @@ const MAX_TOKEN_PROMPTS: u32 = 3;
 
 /// Download every unique line in `config.input` through spotDL, then rewrite
 /// each file's ID3v2.3 tag: drop the POPM rating, store the Spotify copyright,
-/// and move the generated `.lrc` file into a SYLT frame.
+/// and paste the generated `.lrc` file into the ordinary USLT lyrics frame.
 ///
 /// A line is a Spotify URL, a YouTube Music URL, or a
 /// `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pair, and the three may
@@ -177,10 +177,10 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         metadata_totals.languages_detected, metadata_totals.files_updated, config.language
     );
     println!(
-        "Synced lyrics: embedded {} file(s) as SYLT ({} line(s)); removed {} USLT frame(s).",
+        "Lyrics: pasted {} .lrc file(s) into USLT ({} line(s)); removed {} SYLT frame(s).",
         metadata_totals.lyrics_embedded,
         metadata_totals.lines_embedded,
-        metadata_totals.uslt_frames_removed
+        metadata_totals.sylt_frames_removed
     );
     if !metadata_totals.failures.is_empty() {
         println!(
@@ -287,7 +287,7 @@ fn apply_metadata(
     if report.files_updated > 0 {
         let lyrics = if report.lyrics_embedded > 0 {
             format!(
-                ", embedded {} line(s) of synced lyrics as SYLT and deleted the .lrc file",
+                ", pasted {} line(s) of synced lyrics into USLT and deleted the .lrc file",
                 report.lines_embedded
             )
         } else {

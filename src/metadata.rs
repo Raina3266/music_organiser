@@ -3,9 +3,13 @@
 //! Each downloaded file gets one tag update that: drops the unwanted `POPM`
 //! rating and `TSSE` encoder-settings frames, sets the
 //! `TCOP` copyright message fetched from the iTunes Search API, records the
-//! `TLAN` language, and turns the `.lrc` sidecar into a `SYLT` frame while
-//! removing the untimed `USLT` one. The result is read back from disk before
-//! the `.lrc` file is deleted.
+//! `TLAN` language, and pastes the `.lrc` sidecar into the ordinary `USLT`
+//! lyrics frame while removing any `SYLT` synchronised-lyrics frame. The result
+//! is read back from disk before the `.lrc` file is deleted.
+//!
+//! The lyrics keep their `[mm:ss.xx]` timestamps: `USLT` is the frame players
+//! actually read, and the ones that understand timed lyrics parse them out of
+//! its text.
 //!
 //! The `TSRC` ISRC frame is deliberately left as spotDL wrote it: iTunes does
 //! not publish ISRCs, and spotDL already fills the frame from its own metadata.
@@ -17,11 +21,11 @@ use std::{
 
 use id3::{
     ErrorKind, Frame, Tag, TagLike, Version,
-    frame::{Content, SynchronisedLyrics},
+    frame::{Content, Lyrics},
 };
 
 use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
-use crate::lyrics::{detect_language, parse_lrc, sylt_frame, synchronised_lyrics};
+use crate::lyrics::{LYRICS_DESCRIPTION, detect_language, lyric_lines};
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
 const TAG_VERSION: Version = Version::Id3v23;
@@ -50,12 +54,12 @@ pub struct MetadataReport {
     /// Files whose `TLAN` language was detected from their lyrics rather than
     /// taken from the configured default.
     pub languages_detected: usize,
-    /// `.lrc` sidecars embedded as `SYLT` and then deleted.
+    /// `.lrc` sidecars pasted into `USLT` and then deleted.
     pub lyrics_embedded: usize,
     /// Lyric lines written across all embedded files.
     pub lines_embedded: usize,
-    /// `USLT` frames removed after their synced replacement was verified.
-    pub uslt_frames_removed: usize,
+    /// `SYLT` frames removed, spotDL's own included.
+    pub sylt_frames_removed: usize,
     /// Files that could not be finished, and why. Their `.lrc` sidecar is kept.
     pub failures: Vec<FileError>,
 }
@@ -69,7 +73,7 @@ impl MetadataReport {
         self.languages_detected += other.languages_detected;
         self.lyrics_embedded += other.lyrics_embedded;
         self.lines_embedded += other.lines_embedded;
-        self.uslt_frames_removed += other.uslt_frames_removed;
+        self.sylt_frames_removed += other.sylt_frames_removed;
         self.failures.extend(other.failures);
     }
 
@@ -86,8 +90,8 @@ impl MetadataReport {
 /// `copyright` is the message to store, or `None` when no album matched, in
 /// which case the frame is left alone. `default_language` is the ISO-639-2
 /// code to record when the lyrics are not enough to detect one. Any `.lrc`
-/// file sitting next to `audio` is embedded and then deleted, but only after
-/// the whole tag has been read back and checked.
+/// file sitting next to `audio` is pasted into the `USLT` lyrics frame and then
+/// deleted, but only after the whole tag has been read back and checked.
 pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -> MetadataReport {
     let mut report = MetadataReport::default();
 
@@ -110,19 +114,16 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
     if let Some(sidecar) = &sidecar {
         match fs::read(sidecar) {
             Ok(bytes) => {
-                let lines = parse_lrc(&String::from_utf8_lossy(&bytes));
-                if lines.is_empty() {
-                    report.fail(
-                        sidecar.clone(),
-                        "the .lrc file contains no timestamped line, so no synchronised lyrics could be built",
-                    );
+                let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+                if text.is_empty() {
+                    report.fail(sidecar.clone(), "the .lrc file is empty");
                     return report;
                 }
-                if let Some(guess) = detect_language(&lines) {
+                if let Some(guess) = detect_language(&lyric_lines(&text)) {
                     language = guess;
                     detected = true;
                 }
-                lyrics = Some(synchronised_lyrics(lines, &language));
+                lyrics = Some(text);
             }
             Err(error) => {
                 report.fail(
@@ -138,13 +139,19 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
         .iter()
         .map(|frame_id| tag.remove(frame_id).len())
         .sum::<usize>();
-    let uslt_removed = tag.lyrics().count();
+    // spotDL writes a SYLT frame of its own whenever its lyrics arrive in LRC
+    // format, so this removal is not only about undoing earlier runs.
+    let sylt_removed = tag.synchronised_lyrics().count();
+    tag.remove_all_synchronised_lyrics();
     set_text(&mut tag, COPYRIGHT_FRAME, copyright);
     set_text(&mut tag, LANGUAGE_FRAME, Some(language.as_str()));
     if let Some(lyrics) = &lyrics {
-        tag.remove_all_synchronised_lyrics();
         tag.remove_all_lyrics();
-        tag.add_frame(sylt_frame(lyrics, TAG_VERSION));
+        tag.add_frame(Lyrics {
+            lang: language.clone(),
+            description: LYRICS_DESCRIPTION.to_owned(),
+            text: lyrics.clone(),
+        });
     }
 
     if let Err(error) = write_tag_safely(audio, &tag, TAG_VERSION) {
@@ -155,7 +162,7 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
         return report;
     }
 
-    if let Err(reason) = verify(audio, copyright, &language, lyrics.as_ref()) {
+    if let Err(reason) = verify(audio, copyright, &language, lyrics.as_deref()) {
         report.fail(audio.to_path_buf(), reason);
         return report;
     }
@@ -165,15 +172,15 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
             report.fail(
                 sidecar.clone(),
                 format!(
-                    "the SYLT frame was verified but the .lrc file could not be deleted: {error}"
+                    "the USLT frame was verified but the .lrc file could not be deleted: {error}"
                 ),
             );
             return report;
         }
         report.lyrics_embedded = 1;
-        report.lines_embedded = lyrics.content.len();
-        report.uslt_frames_removed = uslt_removed;
+        report.lines_embedded = lyric_lines(lyrics).len();
     }
+    report.sylt_frames_removed = sylt_removed;
 
     report.files_updated = 1;
     report.frames_stripped = frames_stripped;
@@ -212,7 +219,7 @@ fn verify(
     audio: &Path,
     copyright: Option<&str>,
     language: &str,
-    lyrics: Option<&SynchronisedLyrics>,
+    lyrics: Option<&str>,
 ) -> Result<(), String> {
     let tag = Tag::read_from_path(audio)
         .map_err(|error| format!("cannot re-read the file to verify its tag: {error}"))?;
@@ -237,24 +244,22 @@ fn verify(
         }
     }
 
+    if tag.synchronised_lyrics().next().is_some() {
+        return Err("a SYLT synchronised-lyrics frame is still present".to_owned());
+    }
+
     let Some(expected) = lyrics else {
         return Ok(());
     };
-    let stored: Vec<&SynchronisedLyrics> = tag.synchronised_lyrics().collect();
+    let stored: Vec<&Lyrics> = tag.lyrics().collect();
     let [stored] = stored[..] else {
         return Err(format!(
-            "the file holds {} SYLT frame(s) after writing instead of exactly one",
+            "the file holds {} USLT frame(s) after writing instead of exactly one",
             stored.len()
         ));
     };
-    if stored.timestamp_format != expected.timestamp_format
-        || stored.content_type != expected.content_type
-        || stored.content != expected.content
-    {
-        return Err("the SYLT frame read back does not match the .lrc file".to_owned());
-    }
-    if tag.lyrics().next().is_some() {
-        return Err("the unsynchronised USLT frame is still present".to_owned());
+    if stored.text != expected {
+        return Err("the USLT frame read back does not match the .lrc file".to_owned());
     }
     Ok(())
 }
@@ -262,7 +267,7 @@ fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use id3::frame::{Popularimeter, SynchronisedLyricsType, TimestampFormat};
+    use id3::frame::{Popularimeter, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat};
     use std::env;
 
     struct TempDir(PathBuf);
@@ -311,6 +316,15 @@ mod tests {
             description: String::new(),
             text: "plain unsynced text".to_owned(),
         });
+        // spotDL writes a SYLT frame of its own whenever its lyrics arrive in
+        // LRC format. It is the frame most players ignore, so it goes.
+        tag.add_frame(SynchronisedLyrics {
+            lang: "eng".to_owned(),
+            timestamp_format: TimestampFormat::Ms,
+            content_type: SynchronisedLyricsType::Lyrics,
+            description: String::new(),
+            content: vec![(1_000, "first".to_owned())],
+        });
         tag.add_frame(Frame::with_content(
             COPYRIGHT_FRAME,
             Content::Text(String::new()),
@@ -319,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_the_unwanted_frames_fills_the_copyright_and_embeds_the_lyrics() {
+    fn strips_the_unwanted_frames_fills_the_copyright_and_pastes_the_lyrics() {
         let directory = TempDir::new("finalize");
         let audio = directory.0.join("Artist - Song [abc123].mp3");
         let sidecar = directory.0.join("Artist - Song [abc123].lrc");
@@ -337,7 +351,7 @@ mod tests {
         assert_eq!(report.copyrights_written, 1);
         assert_eq!(report.lyrics_embedded, 1);
         assert_eq!(report.lines_embedded, 2);
-        assert_eq!(report.uslt_frames_removed, 1);
+        assert_eq!(report.sylt_frames_removed, 1);
         assert!(!sidecar.exists());
 
         let tag = Tag::read_from_path(&audio).unwrap();
@@ -353,19 +367,20 @@ mod tests {
             Some("GBAYE0601498")
         );
         // Two short lyric lines are not enough to detect from, so the default
-        // is recorded and the SYLT frame agrees with it.
+        // is recorded and the lyrics frame agrees with it.
         assert_eq!(report.languages_detected, 0);
         assert_eq!(
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
             Some("eng")
         );
-        assert_eq!(tag.lyrics().count(), 0);
-        let stored = tag.synchronised_lyrics().next().unwrap();
-        assert_eq!(stored.timestamp_format, TimestampFormat::Ms);
-        assert_eq!(stored.content_type, SynchronisedLyricsType::Lyrics);
+        // No synchronised frame is left, and the .lrc file went into the
+        // ordinary lyrics frame with its timestamps intact.
+        assert_eq!(tag.synchronised_lyrics().count(), 0);
+        let stored = tag.lyrics().next().unwrap();
+        assert_eq!(stored.lang, "eng");
         assert_eq!(
-            stored.content,
-            vec![(1_000, "first".to_owned()), (2_500, "second".to_owned())]
+            stored.text,
+            "[ar: Artist]\n[00:01.00]first\n[00:02.50]second"
         );
         // The rest of the tag survives the rewrite.
         assert_eq!(tag.title(), Some("Song"));
@@ -401,12 +416,15 @@ mod tests {
         let tag = Tag::read_from_path(&audio).unwrap();
         assert!(tag.get("POPM").is_none());
         assert!(tag.get("TSSE").is_none());
-        // Without synced lyrics to replace it, the untimed USLT frame stays.
+        // Without a .lrc file to paste, whatever spotDL wrote into the lyrics
+        // frame stays; only its synchronised frame is removed.
         assert_eq!(tag.lyrics().count(), 1);
+        assert_eq!(tag.synchronised_lyrics().count(), 0);
+        assert_eq!(report.sylt_frames_removed, 1);
     }
 
     #[test]
-    fn an_untimed_sidecar_is_kept_and_reported() {
+    fn an_untimed_sidecar_is_pasted_like_any_other() {
         let directory = TempDir::new("untimed");
         let audio = directory.0.join("Untimed.mp3");
         let sidecar = directory.0.join("Untimed.lrc");
@@ -414,6 +432,26 @@ mod tests {
         fs::write(&sidecar, "[ar: Artist]\njust prose\n").unwrap();
 
         let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
+        assert_eq!(report.failures, Vec::new());
+        assert_eq!(report.lyrics_embedded, 1);
+        assert!(!sidecar.exists());
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.lyrics().next().unwrap().text,
+            "[ar: Artist]\njust prose"
+        );
+    }
+
+    #[test]
+    fn an_empty_sidecar_is_kept_and_reported() {
+        let directory = TempDir::new("emptylrc");
+        let audio = directory.0.join("Empty.mp3");
+        let sidecar = directory.0.join("Empty.lrc");
+        write_spotdl_style_audio(&audio);
+        fs::write(&sidecar, "  \n\n").unwrap();
+
+        let report = finalize(&audio, None, "eng");
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -444,7 +482,7 @@ mod tests {
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
             Some("fra")
         );
-        assert_eq!(tag.synchronised_lyrics().next().unwrap().lang, "fra");
+        assert_eq!(tag.lyrics().next().unwrap().lang, "fra");
     }
 
     #[test]
@@ -464,16 +502,13 @@ mod tests {
         assert_eq!(report.lyrics_embedded, 1);
 
         let tag = Tag::read_from_path(&audio).unwrap();
-        let stored = tag.synchronised_lyrics().next().unwrap();
+        let stored = tag.lyrics().next().unwrap();
         assert_eq!(
-            stored.content,
-            vec![
-                (3_000, "\u{4f60}\u{597d}".to_owned()),
-                (6_000, "caf\u{e9} \u{1f3b5}".to_owned()),
-            ]
+            stored.text,
+            "[00:03.00]\u{4f60}\u{597d}\n[00:06.00]caf\u{e9} \u{1f3b5}"
         );
         // Too little text to detect from, so the configured default is used
-        // for both the SYLT language field and the TLAN frame.
+        // for both the lyrics frame's language field and the TLAN frame.
         assert_eq!(stored.lang, "jpn");
         assert_eq!(
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),

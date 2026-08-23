@@ -112,8 +112,8 @@ the same file.
 
 Every line is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
 tag is then rewritten: the `POPM` rating and `TSSE` encoder-settings frames are
-removed, `TCOP` and `TLAN` are filled in, and the generated `.lrc` file becomes
-a `SYLT` frame and is deleted.
+removed, `TCOP` and `TLAN` are filled in, and the generated `.lrc` file is
+pasted into the ordinary `USLT` lyrics frame and deleted.
 
 No credentials are needed for any of it. The copyright comes from the iTunes
 Search API, which is open to anyone.
@@ -347,7 +347,7 @@ Neither Spotify nor iTunes exposes a language for tracks, so `TLAN` cannot be
 looked up. The synced lyrics are the only evidence available, and the language
 is detected from their text.
 
-- A confident detection sets `TLAN`, and the `SYLT` frame's own language field
+- A confident detection sets `TLAN`, and the lyrics frame's own language field
   is set to match.
 - Too little text, or an unreliable guess, falls back to `--language`
   (default `eng`) rather than recording something invented. Two or more
@@ -359,38 +359,38 @@ The detector reports ISO-639-3, which for every individual language it knows is
 the same as the ISO-639-2/T code ID3v2.3 asks for; the two macrolanguage cases
 are mapped (`cmn` becomes `zho`, `pes` becomes `fas`).
 
-### Synchronised lyrics as an ID3 `SYLT` frame
+### Synced lyrics in the ordinary `USLT` frame
 
-spotDL does not write synchronised lyrics into the tag. `--lyrics synced` only
-embeds the plain text in a `USLT` frame, which has no timestamps, and
-`--generate-lrc` leaves the timed lyrics in a separate `.lrc` file.
+Every download asks spotDL for time-synced lyrics and for the `.lrc` file that
+carries them — `--lyrics synced --generate-lrc`, on every line of the input
+file, with no way to turn it off.
 
-After each successful download this program closes that gap, in the same tag
-write as the rating and copyright changes above:
+After each successful download that `.lrc` file is pasted into the tag, in the
+same write as the rating and copyright changes above:
 
-1. Every `.lrc` file below the output directory is parsed. `[mm:ss.xx]`,
-   `[mm:ss]`, and `[hh:mm:ss.xxx]` timestamps are converted to milliseconds,
-   metadata tags such as `[ar:...]` are ignored, and a line carrying several
-   timestamps is repeated at each one.
-2. The lines are written to the matching audio file as an ID3v2.3 `SYLT`
-   frame: UTF-16 text, millisecond timestamp format, content type "lyrics",
-   language `eng`. Any previous `SYLT` frame is replaced.
-3. The now-redundant `USLT` frame is deleted.
-4. The file is read back from disk and the stored frame is compared with the
-   `.lrc` file. Only if it matches — and the `USLT` frame is really gone — is
-   the `.lrc` file deleted.
+1. The `.lrc` file sitting beside the audio is read and its text is trimmed.
+2. That text is written to the ID3v2.3 `USLT` lyrics frame **verbatim**,
+   `[mm:ss.xx]` timestamps and all. Any previous `USLT` frame is replaced.
+3. Every `SYLT` synchronised-lyrics frame is removed, including the one spotDL
+   writes itself whenever its lyrics arrive in LRC format.
+4. The file is read back from disk. Only if the stored `USLT` frame matches the
+   `.lrc` file, and no `SYLT` frame survives, is the `.lrc` file deleted.
 
-The frame payload is written directly rather than through the `id3` crate's
-encoder, which appends a trailing NUL byte that is not in the ID3v2.3
-specification and makes strict parsers such as mutagen discard the whole
-frame.
+`USLT` is the frame players actually read; `SYLT` is the one most of them
+ignore. Players that do understand timed lyrics parse the timestamps out of the
+`USLT` text, so keeping the `.lrc` text as it came is what makes the lyrics show
+up in both kinds of player.
+
+Only the language detector sees the lyrics without their timestamps — the
+`[mm:ss.xx]` prefixes and any `[ar:...]` metadata header would only mislead it.
 
 If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
 never the thing that gets lost, nothing is written to the audio file, and the
-line it belongs to is reported as failed so it appears in the retry list. The
-usual cause is a `.lrc` file with no timestamped line at all. A line for which
-spotDL generated no `.lrc` file is not a failure: the rating and copyright
-changes are still applied, and there were simply no synced lyrics to embed.
+line it belongs to is reported as failed so it appears in the retry list. An
+empty `.lrc` file is the only content that counts as a failure; an untimed one
+is pasted like any other. A line for which spotDL generated no `.lrc` file is
+not a failure either: the rating and copyright changes are still applied, and
+there were simply no synced lyrics to paste.
 
 ### How downloaded files are found again
 
@@ -619,20 +619,22 @@ download command with `--auto-download-deno`.
 
 Its lyrics could not be embedded, and the reason is printed during the run and
 recorded in `music-tag-transfer-download-failures.txt`. The usual cause is a
-`.lrc` file that contains no timestamped line. Retry the line from
-`output.txt`, or delete the `.lrc` file yourself if the track simply has no
-synced lyrics.
+`.lrc` file that is empty, or an audio file whose tag could not be written.
+Retry the line from `output.txt`, or delete the `.lrc` file yourself if the
+track simply has no lyrics worth keeping.
 
-### A player shows no synced lyrics
+### A player shows no lyrics
 
 Confirm the frame is there, for example with mutagen:
 
 ```bash
-python3 -c "from mutagen.id3 import ID3; print(ID3('track.mp3').getall('SYLT'))"
+python3 -c "from mutagen.id3 import ID3; print(ID3('track.mp3').getall('USLT'))"
 ```
 
-If the frame is present, the player does not support `SYLT`; many players read
-only the untimed `USLT` frame, which this program removes.
+The text should be the `.lrc` file as it was downloaded, timestamps included. If
+it is there and the player still shows nothing, the player is not reading `USLT`
+at all. If the lyrics show but do not scroll with the music, the player does not
+parse LRC timestamps out of `USLT`; nothing in the tag can fix that.
 
 ### Metadata commands find no files
 

@@ -275,8 +275,10 @@ METADATA:
         TSSE   the encoder-settings string FFmpeg leaves behind is removed
         TCOP   the copyright message, looked up per album on the iTunes
                Search API, which needs no account, key, or token
-        TLAN   the language, detected from the synced lyrics, falling back
-               to --language when the lyrics do not settle it
+        TLAN   the language, detected from the lyric text with its
+               timestamps stripped, falling back to --language when the
+               lyrics do not settle it
+        SYLT   any synchronised-lyrics frame is removed, spotDL's included
 
     TSRC is left exactly as spotDL wrote it. iTunes publishes no ISRCs, and
     spotDL already fills that frame from its own metadata.
@@ -286,11 +288,18 @@ METADATA:
     Use --no-copyright to skip the lookup.
 
 SYNCED LYRICS:
-    spotDL embeds only untimed USLT lyrics, so every generated .lrc file is
-    parsed into an ID3v2.3 SYLT frame with millisecond timestamps. The USLT
-    frame is removed, the frame is read back from the file to verify it, and
-    only then is the .lrc file deleted. If any of that fails, the .lrc file is
-    kept and the line is added to the retry list.
+    Every download asks spotDL for time-synced lyrics and for the .lrc file
+    that carries them:
+
+        --lyrics synced --generate-lrc
+
+    That .lrc file is then pasted, verbatim and with its [mm:ss.xx] timestamps
+    intact, into the ordinary USLT lyrics frame — the frame players actually
+    read, and the one whose text the players that understand timed lyrics
+    parse the timestamps out of. Any SYLT synchronised-lyrics frame is removed,
+    spotDL's own included. The frame is read back from the file to verify it,
+    and only then is the .lrc file deleted. If any of that fails, the .lrc file
+    is kept and the line is added to the retry list.
 
 SPOTIFY MODE:
     Before the first download, an interactive run asks for a Spotify access
