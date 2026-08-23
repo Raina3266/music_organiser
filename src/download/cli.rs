@@ -243,6 +243,14 @@ INPUT FORMAT:
         spotdl download \"PAIR\" --overwrite force --format mp3 \\
               --lyrics synced --generate-lrc
 
+FILE LAYOUT:
+    Songs are grouped into one folder per album, so everything from the same
+    album lands together:
+
+        <OUTPUT_DIR>/{{Album Artist}} || {{Album}}/{{artists}} - {{title}}.mp3
+
+    output.txt and the failure report stay in the output directory itself.
+
 METADATA:
     After each download the ID3v2.3 tag is rewritten:
 

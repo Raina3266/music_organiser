@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
-const OUTPUT_TEMPLATE: &str = "{artists} - {title} [{track-id}].{output-ext}";
+/// Songs are grouped into one folder per album, named `{Album Artist} || {Album}`.
+///
+/// spotDL creates the folder and sanitizes both values for the filesystem, so a
+/// track lands beside the rest of its album without any file moving here.
+const OUTPUT_TEMPLATE: &str =
+    "{album-artist} || {album}/{artists} - {title} [{track-id}].{output-ext}";
 /// Every download uses the same audio format, overwrite policy, and lyrics
 /// options so each run reproduces exactly what the input file asks for.
 const FIXED_ARGUMENTS: &[&str] = &[
@@ -496,6 +501,21 @@ mod tests {
             classify(&result(false, r#"{\"reason\":\"QUOTA_EXCEEDED\"}"#)),
             Classification::QuotaExceeded(None)
         );
+    }
+
+    #[test]
+    fn groups_downloads_into_one_folder_per_album() {
+        let args = arguments(false, None);
+        let template = args
+            .iter()
+            .position(|argument| argument == "--output")
+            .map(|index| args[index + 1].clone())
+            .expect("the output template is always passed");
+        let (folder, file) = template
+            .split_once('/')
+            .expect("the template puts each song in an album folder");
+        assert_eq!(folder, "{album-artist} || {album}");
+        assert_eq!(file, "{artists} - {title} [{track-id}].{output-ext}");
     }
 
     #[test]

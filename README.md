@@ -224,11 +224,39 @@ The command also passes `--print-errors`, `--max-retries 0` (retries are
 handled here instead), and spotDL's output template:
 
 ```text
-{artists} - {title} [{track-id}].{output-ext}
+{album-artist} || {album}/{artists} - {title} [{track-id}].{output-ext}
 ```
 
 Because `--overwrite force` is used, rerunning an input file re-downloads
 every pair in it rather than skipping finished files.
+
+### One folder per album
+
+The leading `{album-artist} || {album}` in that template groups every song into
+a folder named after its album, so tracks that share an album land together:
+
+```text
+music/
+├── Daft Punk || Discovery/
+│   ├── Daft Punk - One More Time [0DiWol3AO6WpXZgp0goxAV].mp3
+│   └── Daft Punk - Aerodynamic [2VEZx7NWsZ1D0eJ4uv5Fym].mp3
+├── Daft Punk || Random Access Memories/
+│   └── Daft Punk - Get Lucky [69kOkLUCkxIZYexIgSG8rq].mp3
+├── output.txt
+└── music-tag-transfer-download-failures.txt
+```
+
+spotDL creates the folders and sanitizes both values for the filesystem, so no
+files are moved after the fact. `output.txt` and the failure report stay in the
+output directory itself, and a `.lrc` file that had to be kept stays beside its
+audio file inside the album folder.
+
+Two caveats:
+
+- Windows does not allow `|` in a path, so spotDL sanitizes the separator away
+  there; the folder is still one per album, but it will not read `||`.
+- Existing downloads are not moved. Rerunning the same input file re-downloads
+  them into the new layout, because `--overwrite force` is used.
 
 ### Rating, copyright, ISRC, and language frames
 
