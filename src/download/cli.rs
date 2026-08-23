@@ -223,7 +223,7 @@ OPTIONS:
         --official-api                Opt in to Spotify's official Web API and its quotas
         --auth-token <TOKEN>          Official mode: short-lived Spotify access token
         --token-file <FILE>           Official mode: read an access token from a file
-        --non-interactive             Never prompt for Deno or an expired official token
+        --non-interactive             Never prompt for a token, Deno, or a replacement
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
         --no-copyright                Skip the iTunes copyright lookup entirely
         --language <CODE>             Fallback ISO-639-2 language [default: eng]
@@ -293,8 +293,23 @@ SYNCED LYRICS:
     kept and the line is added to the retry list.
 
 SPOTIFY MODE:
-    The default uses spotDL's token-free client. --official-api is an explicit
-    fallback; only then are --auth-token, --token-file, and SPOTIFY_AUTH_TOKEN used.
+    Before the first download, an interactive run asks for a Spotify access
+    token:
+
+        Paste an access token, or press Enter to download token-free:
+
+    Pasting one switches the run to Spotify's official Web API, which is the
+    only source for the ISRC (TSRC) frame; pressing Enter keeps spotDL's
+    token-free client, where TSRC stays empty. A token from a developer-mode
+    app needs the app owner to hold Spotify Premium; one copied from the
+    open.spotify.com web player does not, but expires within the hour, and a
+    replacement is asked for when it does.
+
+    The prompt is skipped when --auth-token, --token-file, or
+    SPOTIFY_AUTH_TOKEN already supplied a token, when --non-interactive is
+    used, and when stdin is not a terminal, so scripted runs are unchanged.
+    --official-api forces official mode whether or not a token is supplied;
+    --auth-token and --token-file still require it.
 
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path

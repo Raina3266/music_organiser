@@ -31,7 +31,7 @@ const MAX_TOKEN_PROMPTS: u32 = 3;
 /// A return value of `0` means every line downloaded and had its metadata
 /// applied; `1` means a retry list was written for failed or unattempted
 /// lines.
-pub fn run(config: Config) -> Result<i32, String> {
+pub fn run(mut config: Config) -> Result<i32, String> {
     let input = input::load(&config.input)?;
     fs::create_dir_all(&config.output)
         .map_err(|error| format!("cannot create {}: {error}", config.output.display()))?;
@@ -53,15 +53,6 @@ pub fn run(config: Config) -> Result<i32, String> {
             "Warning: could not parse the spotDL version. The download command requires spotDL 4.5.0 or newer."
         );
     }
-    if !config.official_api
-        && let Some(risk) = spotdl::official_config_risk()?
-    {
-        return Err(format!(
-            "spotDL config {} enables official-only setting(s): {}. The download command stopped before downloading so token-free mode is not silently overridden. Set load_config to false, clear those settings, or rerun with --official-api intentionally.",
-            risk.path.display(),
-            risk.settings.join(", ")
-        ));
-    }
     println!(
         "Loaded {} unique download(s) from {}: {}.",
         input.entries.len(),
@@ -72,16 +63,38 @@ pub fn run(config: Config) -> Result<i32, String> {
         println!("Ignored {} duplicate line(s).", input.duplicate_count);
     }
     println!("Downloads will be stored in {}.", config.output.display());
+
+    // The token is asked for before anything is downloaded, because it decides
+    // which Spotify metadata source the whole run uses.
+    let interactive = !config.non_interactive && io::stdin().is_terminal();
+    let mut auth_token = startup_token(&mut config, interactive)?;
+
+    // Only a token-free run can be silently turned into an official one by
+    // spotDL's own config, so this check waits until the mode is settled.
+    if !config.official_api
+        && let Some(risk) = spotdl::official_config_risk()?
+    {
+        return Err(format!(
+            "spotDL config {} enables official-only setting(s): {}. The download command stopped before downloading so token-free mode is not silently overridden. Set load_config to false, clear those settings, or rerun with --official-api intentionally.",
+            risk.path.display(),
+            risk.settings.join(", ")
+        ));
+    }
+
     if config.official_api {
         println!("Spotify metadata mode: official Web API (quota limits apply).");
+        if auth_token.is_none() {
+            eprintln!(
+                "Note: official mode was requested without a token, so spotDL falls back to its own credentials."
+            );
+        }
     } else {
-        println!("Spotify metadata mode: spotDL token-free client.");
+        println!("Spotify metadata mode: spotDL token-free client; TSRC stays empty.");
         if env::var_os("SPOTIFY_AUTH_TOKEN").is_some() {
             eprintln!("Note: SPOTIFY_AUTH_TOKEN is ignored unless --official-api is supplied.");
         }
     }
 
-    let interactive = !config.non_interactive && io::stdin().is_terminal();
     let mut itunes = if config.no_copyright {
         println!("Copyright lookup: disabled with --no-copyright.");
         None
@@ -89,7 +102,6 @@ pub fn run(config: Config) -> Result<i32, String> {
         println!("Copyright will be looked up per album through the iTunes Search API.");
         Some(ItunesClient::new()?)
     };
-    let mut auth_token = initial_token(&config)?;
     let total = input.entries.len();
     let mut completed = 0usize;
     let mut failures = Vec::new();
@@ -337,6 +349,48 @@ fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<Str
         println!("iTunes has no matching album for \"{artist} - {album}\".");
     }
     Ok(copyright)
+}
+
+/// The token this run starts with, asking for one when nothing supplied it.
+///
+/// The prompt is skipped when a token already came from an option, a file, or
+/// the environment, and when the run is not interactive, so scripted runs
+/// behave exactly as before.
+fn startup_token(config: &mut Config, interactive: bool) -> Result<Option<String>, String> {
+    if let Some(token) = initial_token(config)? {
+        return Ok(Some(token));
+    }
+    if !interactive {
+        return Ok(None);
+    }
+
+    let mut attempt = 1;
+    loop {
+        match token::prompt_before_downloading() {
+            Ok(token) => return Ok(adopt_token(config, token)),
+            Err(error) if attempt < MAX_TOKEN_PROMPTS => {
+                eprintln!("Invalid token: {error}");
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "invalid token after {MAX_TOKEN_PROMPTS} attempts: {error}"
+                ));
+            }
+        }
+    }
+}
+
+/// Fold the answer to the startup prompt into the run's configuration.
+///
+/// Supplying a token is what turns official mode on, because a token is only
+/// ever passed to spotDL alongside `--use-official-api`. An empty answer leaves
+/// the default token-free mode alone.
+fn adopt_token(config: &mut Config, token: Option<String>) -> Option<String> {
+    if token.is_some() {
+        config.official_api = true;
+    }
+    token
 }
 
 fn initial_token(config: &Config) -> Result<Option<String>, String> {
@@ -642,4 +696,56 @@ fn write_failure_report(
 
 fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{adopt_token, initial_token};
+    use crate::download::cli::Config;
+    use std::path::PathBuf;
+
+    fn config() -> Config {
+        Config {
+            input: PathBuf::from("links.txt"),
+            output: PathBuf::from("downloads"),
+            spotdl: "spotdl".into(),
+            official_api: false,
+            auth_token: None,
+            token_file: None,
+            non_interactive: false,
+            auto_download_deno: false,
+            no_copyright: false,
+            language: "eng".into(),
+            max_attempts: 3,
+            max_rate_limit_wait: 300,
+        }
+    }
+
+    #[test]
+    fn a_pasted_token_turns_on_official_mode() {
+        let mut config = config();
+        let token = adopt_token(&mut config, Some("test-token-12345678901234567890".into()));
+
+        assert_eq!(token.as_deref(), Some("test-token-12345678901234567890"));
+        assert!(config.official_api);
+    }
+
+    #[test]
+    fn declining_the_prompt_keeps_the_token_free_default() {
+        let mut config = config();
+        assert_eq!(adopt_token(&mut config, None), None);
+        assert!(!config.official_api);
+    }
+
+    #[test]
+    fn an_option_supplied_token_is_used_without_prompting() {
+        let mut config = config();
+        config.official_api = true;
+        config.auth_token = Some("Bearer test-token-12345678901234567890".into());
+
+        assert_eq!(
+            initial_token(&config).unwrap().as_deref(),
+            Some("test-token-12345678901234567890")
+        );
+    }
 }

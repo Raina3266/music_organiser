@@ -34,6 +34,10 @@ all three. It then rewrites each file's ID3v2.3 tag: the POPM rating frame is
 removed, the TCOP copyright message is looked up on iTunes, and the generated
 .lrc file becomes a SYLT frame.
 
+Before the first download, an interactive run asks for a Spotify access token.
+Pasting one uses Spotify's official Web API, the only source for the ISRC
+frame; pressing Enter downloads token-free.
+
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.
 Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.

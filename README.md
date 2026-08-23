@@ -209,7 +209,7 @@ stops before starting spotDL.
 | `--official-api` | Explicitly use Spotify's official Web API |
 | `--auth-token <TOKEN>` | Official mode: use this short-lived access token |
 | `--token-file <FILE>` | Official mode: read the access token from a file |
-| `--non-interactive` | Never prompt for Deno or a replacement token |
+| `--non-interactive` | Never prompt for a token, Deno, or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
 | `--no-copyright` | Skip the iTunes copyright lookup |
 | `--language <CODE>` | Fallback ISO-639-2 language for `TLAN`; default `eng` |
@@ -426,6 +426,45 @@ If spotDL reports that Deno is required:
 - an interactive run asks before invoking `spotdl --download-deno`;
 - `--auto-download-deno` approves that setup automatically;
 - `--non-interactive` without automatic setup stops and preserves the lines.
+
+### The token prompt
+
+Before the first download, an interactive run asks for a Spotify access token:
+
+```text
+Spotify metadata source
+  A token switches this run to Spotify's official Web API, the only source for
+  the ISRC (TSRC) frame; spotDL's token-free client always reports an empty one.
+  A developer-app token needs the app owner to have Spotify Premium; a token
+  copied from the open.spotify.com web player does not, but expires within the
+  hour, and this command will ask again when it does.
+  Never enter your password or Client Secret.
+Paste an access token, or press Enter to download token-free:
+```
+
+Pressing Enter is a valid answer and keeps the default token-free mode, so the
+prompt is an offer rather than a requirement. Pasting a token switches the run
+to Spotify's official Web API, because a token is only ever passed to spotDL
+alongside `--use-official-api`. A malformed token is reported and asked for
+again, up to three times.
+
+The token may be pasted in any of the forms devtools hands you — a bare token,
+`Bearer ...`, or a quoted `const token = '...'` assignment.
+
+The prompt is skipped, leaving behaviour exactly as it was, when:
+
+- `--auth-token`, `--token-file`, or `SPOTIFY_AUTH_TOKEN` already supplied one;
+- `--non-interactive` was passed;
+- stdin is not a terminal, as in a cron job or a pipeline.
+
+Which token you can use depends on where it came from. A token issued to a
+developer-mode Spotify app requires the **app owner to hold an active Premium
+subscription** — since Spotify's February 2026 developer changes, such an app
+owned by a free account answers every request with `403 Active premium
+subscription required for the owner of the app`, which stops the batch. A token
+copied from the `open.spotify.com` web player carries no such requirement, but
+expires within the hour; when it does, an interactive run asks for a
+replacement.
 
 ### Token-free and official API modes
 
