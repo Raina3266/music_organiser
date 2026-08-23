@@ -1,6 +1,7 @@
 use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
+use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
 
 pub const HELP: &str = concat!(
@@ -14,10 +15,14 @@ USAGE:
     ",
     env!("CARGO_PKG_NAME"),
     " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
+    ",
+    env!("CARGO_PKG_NAME"),
+    " export <FOLDER> [OUTPUT_CSV] [--overwrite]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
     delete      Remove selected ID3 tags from a folder recursively
+    export      Write every ID3 frame under a folder to one CSV file
 
 EXAMPLES:
     ",
@@ -26,6 +31,9 @@ EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
+    ",
+    env!("CARGO_PKG_NAME"),
+    " export \"/music\" frames.csv
 
 The download command reads one link per line and forces MP3 with synced
 lyrics. A line is a Spotify URL, a YouTube Music URL, or a
@@ -42,6 +50,12 @@ Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.
 Supported music containers: MP3/MP2/MP1, WAV, AIFF, and AIF.
 
+The export command reads instead of writing: it walks the same folders, gives
+every file a row and every frame ID a column, and leaves a cell empty where a
+file has no such frame. Without OUTPUT_CSV it writes id3-frames.csv inside
+the scanned folder, and it refuses to replace an existing file unless
+--overwrite is given.
+
 Run `",
     env!("CARGO_PKG_NAME"),
     " download --help` for command-specific help.
@@ -56,6 +70,11 @@ pub enum Command {
         folder: PathBuf,
         tags: Vec<TagSpec>,
         dry_run: bool,
+    },
+    Export {
+        folder: PathBuf,
+        output: PathBuf,
+        overwrite: bool,
     },
     Help,
     Version,
@@ -75,6 +94,7 @@ where
         "-V" | "--version" => Ok(Command::Version),
         "download" => parse_download(&args[1..]),
         "delete" => parse_delete(&args[1..]),
+        "export" => parse_export(&args[1..]),
         _ => Err(format!("unknown command {command:?}")),
     }
 }
@@ -124,6 +144,35 @@ fn parse_delete(args: &[OsString]) -> Result<Command, String> {
         folder: PathBuf::from(positional[0]),
         tags,
         dry_run,
+    })
+}
+
+fn parse_export(args: &[OsString]) -> Result<Command, String> {
+    let mut positional = Vec::new();
+    let mut overwrite = false;
+
+    for argument in args {
+        if argument == "--overwrite" {
+            overwrite = true;
+        } else if argument.to_string_lossy().starts_with('-') {
+            return Err(format!("unknown option {:?}", argument.to_string_lossy()));
+        } else {
+            positional.push(argument);
+        }
+    }
+
+    let folder = match positional.len() {
+        1 | 2 => PathBuf::from(positional[0]),
+        _ => return Err("export requires a folder and an optional CSV path".to_owned()),
+    };
+    let output = positional
+        .get(1)
+        .map_or_else(|| default_csv_path(&folder), PathBuf::from);
+
+    Ok(Command::Export {
+        folder,
+        output,
+        overwrite,
     })
 }
 
@@ -211,6 +260,41 @@ mod tests {
                 frame_id: "TENC"
             }]
         );
+    }
+
+    #[test]
+    fn parses_export_with_an_explicit_destination() {
+        let command =
+            parse_args(strings(&["export", "/music", "frames.csv", "--overwrite"])).unwrap();
+
+        assert_eq!(
+            command,
+            Command::Export {
+                folder: PathBuf::from("/music"),
+                output: PathBuf::from("frames.csv"),
+                overwrite: true,
+            }
+        );
+    }
+
+    #[test]
+    fn export_defaults_to_a_csv_inside_the_scanned_folder() {
+        let command = parse_args(strings(&["export", "/music"])).unwrap();
+
+        assert_eq!(
+            command,
+            Command::Export {
+                folder: PathBuf::from("/music"),
+                output: PathBuf::from("/music/id3-frames.csv"),
+                overwrite: false,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_export_without_a_folder() {
+        assert!(parse_args(strings(&["export"])).is_err());
+        assert!(parse_args(strings(&["export", "/music", "a.csv", "b.csv"])).is_err());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, download,
+    delete_tags_recursively, download, export_frames_to_csv,
 };
 
 fn main() -> ExitCode {
@@ -69,6 +69,34 @@ fn run() -> Result<ExitCode, String> {
                     "{} file(s) could not be processed",
                     report.errors.len()
                 ))
+            }
+        }
+        Command::Export {
+            folder,
+            output,
+            overwrite,
+        } => {
+            let report = export_frames_to_csv(&folder, &output, overwrite)
+                .map_err(|error| error.to_string())?;
+
+            println!(
+                "Wrote {} row(s) and {} frame column(s) to {}. Exported {} frame(s) from {} \
+                 tagged file(s); {} file(s) had no ID3 tag.",
+                report.files_with_tag + report.files_without_tag,
+                report.frame_columns,
+                output.display(),
+                report.frames_exported,
+                report.files_with_tag,
+                report.files_without_tag,
+            );
+
+            if report.errors.is_empty() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                for error in &report.errors {
+                    eprintln!("{}: {}", error.path.display(), error.message);
+                }
+                Err(format!("{} file(s) could not be read", report.errors.len()))
             }
         }
     }
