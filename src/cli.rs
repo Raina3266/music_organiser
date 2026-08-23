@@ -21,7 +21,7 @@ USAGE:
 
 COMMANDS:
     resolve     Convert free-text track descriptions into Spotify URLs
-    download    Download Spotify links from a text file through spotDL
+    download    Download YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pairs through spotDL
     delete      Remove selected ID3 tags from a folder recursively
 
 EXAMPLES:
@@ -30,10 +30,14 @@ EXAMPLES:
     " resolve tracks.txt spotify-links.txt
     ",
     env!("CARGO_PKG_NAME"),
-    " download spotify-links.txt --output ~/Documents/Music
+    " download pairs.txt --output ~/Documents/Music
     ",
     env!("CARGO_PKG_NAME"),
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
+
+The download command reads one YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per
+line, forces MP3 with synced lyrics, and rewrites each generated .lrc file into
+an ID3v2.3 SYLT frame before deleting it.
 
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.

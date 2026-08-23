@@ -1,12 +1,11 @@
-use std::{
-    error::Error,
-    fmt, fs,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, fmt, path::Path};
 
 use id3::{ErrorKind, Tag, TagLike, Version};
 
-use crate::{files::music_files_recursively, frames::TagSpec};
+use crate::{
+    files::{FileError, music_files_recursively, write_tag_safely},
+    frames::TagSpec,
+};
 
 #[derive(Debug, Default, Eq, PartialEq)]
 pub struct DeleteReport {
@@ -16,12 +15,6 @@ pub struct DeleteReport {
     pub files_without_tag: usize,
     pub frames_removed: usize,
     pub errors: Vec<FileError>,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-pub struct FileError {
-    pub path: PathBuf,
-    pub message: String,
 }
 
 #[derive(Debug)]
@@ -83,7 +76,7 @@ pub fn delete_tags_recursively(
             continue;
         }
 
-        if !dry_run && let Err(error) = write_tag_safely(&path, &tag) {
+        if !dry_run && let Err(error) = write_tag_safely(&path, &tag, Version::Id3v23) {
             report.errors.push(FileError {
                 path,
                 message: error.to_string(),
@@ -98,32 +91,11 @@ pub fn delete_tags_recursively(
     Ok(report)
 }
 
-fn write_tag_safely(path: &Path, tag: &Tag) -> Result<(), Box<dyn Error>> {
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| format!("{} has no file name", path.display()))?
-        .to_string_lossy();
-    let temporary = path.with_file_name(format!(
-        ".{file_name}.{}.music-tag-transfer.tmp",
-        std::process::id()
-    ));
-
-    fs::copy(path, &temporary)?;
-    if let Err(error) = tag.write_to_path(&temporary, Version::Id3v23) {
-        let _ = fs::remove_file(&temporary);
-        return Err(Box::new(error));
-    }
-
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(Box::new(error));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
+        path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };

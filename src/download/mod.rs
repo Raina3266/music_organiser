@@ -7,20 +7,25 @@ mod token;
 use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
+use crate::lyrics::{self, LyricsReport};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
-/// Download every unique Spotify link in `config.input` through spotDL.
+/// Download every unique `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair in
+/// `config.input` through spotDL, then move each generated `.lrc` file into an
+/// ID3v2.3 SYLT frame.
 ///
-/// A return value of `0` means every entry completed; `1` means a retry list
-/// was written for failed or unattempted entries.
+/// A return value of `0` means every pair downloaded and had its synced lyrics
+/// embedded; `1` means a retry list was written for failed or unattempted
+/// pairs.
 pub fn run(config: Config) -> Result<i32, String> {
     let input = input::load(&config.input)?;
     fs::create_dir_all(&config.output)
@@ -53,12 +58,12 @@ pub fn run(config: Config) -> Result<i32, String> {
         ));
     }
     println!(
-        "Loaded {} unique Spotify link(s) from {}.",
+        "Loaded {} unique YouTube Music/Spotify pair(s) from {}.",
         input.entries.len(),
         config.input.display()
     );
     if input.duplicate_count > 0 {
-        println!("Ignored {} duplicate link(s).", input.duplicate_count);
+        println!("Ignored {} duplicate pair(s).", input.duplicate_count);
     }
     println!("Downloads will be stored in {}.", config.output.display());
     if config.official_api {
@@ -77,16 +82,22 @@ pub fn run(config: Config) -> Result<i32, String> {
     let mut failures = Vec::new();
     let mut stop = None;
     let mut deno_install_attempted = false;
+    let mut lyrics_totals = LyricsReport::default();
+    let mut retained_lyrics: HashSet<PathBuf> = HashSet::new();
 
     for (index, entry) in input.entries.iter().enumerate() {
-        println!("\n[{}/{}] Downloading {}", index + 1, total, entry.url);
-        match download_entry(
+        println!("\n[{}/{}] Downloading {}", index + 1, total, entry.query);
+        let mut outcome = download_entry(
             &config,
             entry,
             &mut auth_token,
             interactive,
             &mut deno_install_attempted,
-        )? {
+        )?;
+        if matches!(outcome, EntryOutcome::Completed) {
+            outcome = embed_lyrics(&config, &mut retained_lyrics, &mut lyrics_totals);
+        }
+        match outcome {
             EntryOutcome::Completed => completed += 1,
             EntryOutcome::Failed(reason) => {
                 eprintln!("Failed: {reason}");
@@ -106,12 +117,24 @@ pub fn run(config: Config) -> Result<i32, String> {
 
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
+    println!(
+        "Synced lyrics: embedded {} file(s) as SYLT ({} line(s)); removed {} USLT frame(s).",
+        lyrics_totals.files_embedded,
+        lyrics_totals.lines_embedded,
+        lyrics_totals.uslt_frames_removed
+    );
+    if !lyrics_totals.failures.is_empty() {
+        println!(
+            "Kept {} .lrc file(s) whose lyrics could not be embedded; their pairs are in the retry list.",
+            lyrics_totals.failures.len()
+        );
+    }
     if let Some(stop) = &stop {
         let remaining = total.saturating_sub(stop.entry_index + 1);
         println!("Not attempted: {remaining}");
         println!("Reason for stopping: {}", stop.reason);
         println!(
-            "Rerun the same command after fixing the reported problem; existing files will be skipped."
+            "Rerun the same command after fixing the reported problem; spotDL uses --overwrite force, so every retried pair is downloaded again."
         );
     }
 
@@ -119,15 +142,15 @@ pub fn run(config: Config) -> Result<i32, String> {
         .as_ref()
         .map(|stop| stop.entry_index + 1)
         .unwrap_or(total);
-    let failed_urls_path = output::write_failed_urls(
+    let retry_path = output::write_retry_queries(
         &config.output,
-        failures.iter().map(|failure| failure.url.as_str()).chain(
+        failures.iter().map(|failure| failure.query.as_str()).chain(
             input.entries[pending_start..]
                 .iter()
-                .map(|entry| entry.url.as_str()),
+                .map(|entry| entry.query.as_str()),
         ),
     )?;
-    println!("Retry URL list: {}", failed_urls_path.display());
+    println!("Retry pair list: {}", retry_path.display());
 
     if !failures.is_empty() {
         let report = write_failure_report(&config.output, &failures, stop.as_ref())?;
@@ -139,6 +162,54 @@ pub fn run(config: Config) -> Result<i32, String> {
     } else {
         1
     })
+}
+
+/// Turn the `.lrc` files spotDL just generated into verified SYLT frames.
+///
+/// A pair whose lyrics cannot be embedded is reported as failed so it lands in
+/// the retry list, and its `.lrc` file stays on disk. That file is then
+/// remembered so the same failure is not charged to every later pair.
+fn embed_lyrics(
+    config: &Config,
+    retained: &mut HashSet<PathBuf>,
+    totals: &mut LyricsReport,
+) -> EntryOutcome {
+    let report = match lyrics::embed_synced_lyrics(&config.output, retained) {
+        Ok(report) => report,
+        Err(error) => return EntryOutcome::Abort(error),
+    };
+
+    if report.files_scanned == 0 {
+        println!("No .lrc file was generated; spotDL found no synchronised lyrics for this pair.");
+    }
+    let reasons = report
+        .failures
+        .iter()
+        .map(|failure| format!("{}: {}", failure.path.display(), failure.message))
+        .collect::<Vec<_>>();
+    for reason in &reasons {
+        eprintln!("Lyrics: {reason}");
+    }
+    for failure in &report.failures {
+        retained.insert(failure.path.clone());
+    }
+    if report.files_embedded > 0 {
+        println!(
+            "Embedded {} line(s) of synced lyrics as SYLT and deleted the .lrc file.",
+            report.lines_embedded
+        );
+    }
+
+    let outcome = if reasons.is_empty() {
+        EntryOutcome::Completed
+    } else {
+        EntryOutcome::Failed(format!(
+            "the audio downloaded but its synced lyrics were not embedded ({}); the .lrc file was kept",
+            reasons.join("; ")
+        ))
+    };
+    totals.absorb(report);
+    outcome
 }
 
 fn initial_token(config: &Config) -> Result<Option<String>, String> {
@@ -174,7 +245,7 @@ fn download_entry(
         let result = spotdl::download(
             &config.spotdl,
             &config.output,
-            &entry.url,
+            &entry.query,
             config.official_api,
             auth_token.as_deref(),
         )?;
@@ -302,7 +373,7 @@ fn download_entry(
             }
             Classification::NotFound => {
                 return Ok(EntryOutcome::Failed(
-                    "spotDL could not find downloadable audio for this Spotify link".into(),
+                    "spotDL could not find downloadable audio for this pair".into(),
                 ));
             }
             Classification::Failed => {
@@ -387,7 +458,7 @@ enum EntryOutcome {
 #[derive(Debug)]
 struct Failure {
     line: usize,
-    url: String,
+    query: String,
     reason: String,
 }
 
@@ -401,7 +472,7 @@ impl Failure {
     fn new(entry: &Entry, reason: String) -> Self {
         Self {
             line: entry.line,
-            url: entry.url.clone(),
+            query: entry.query.clone(),
             reason,
         }
     }
@@ -433,7 +504,7 @@ fn write_failure_report(
         report.push_str(&format!(
             "line {}\t{}\t{}\n",
             failure.line,
-            failure.url,
+            failure.query,
             one_line(&failure.reason)
         ));
     }

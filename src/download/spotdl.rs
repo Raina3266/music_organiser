@@ -6,6 +6,17 @@ use std::process::{Command, Stdio};
 use std::thread;
 
 const OUTPUT_TEMPLATE: &str = "{artists} - {title} [{track-id}].{output-ext}";
+/// Every download uses the same audio format, overwrite policy, and lyrics
+/// options so each run reproduces exactly what the input file asks for.
+const FIXED_ARGUMENTS: &[&str] = &[
+    "--overwrite",
+    "force",
+    "--format",
+    "mp3",
+    "--lyrics",
+    "synced",
+    "--generate-lrc",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProcessResult {
@@ -139,18 +150,22 @@ fn json_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
 pub(super) fn download(
     program: &str,
     output_dir: &Path,
-    url: &str,
+    query: &str,
     official_api: bool,
     token: Option<&str>,
 ) -> Result<ProcessResult, String> {
-    let mut command = download_command(program, output_dir, url, official_api, token);
+    let mut command = download_command(program, output_dir, query, official_api, token);
     run_relayed(&mut command, program)
 }
 
+/// Build `spotdl ... download "YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL"`.
+///
+/// The pair is passed as a single argument; spotDL reads the part before `|`
+/// as the audio source and the part after it as the metadata source.
 fn download_command(
     program: &str,
     output_dir: &Path,
-    url: &str,
+    query: &str,
     official_api: bool,
     token: Option<&str>,
 ) -> Command {
@@ -162,15 +177,14 @@ fn download_command(
         }
     }
     command
-        .arg("--overwrite")
-        .arg("skip")
+        .args(FIXED_ARGUMENTS)
         .arg("--print-errors")
         .arg("--max-retries")
         .arg("0")
         .arg("--output")
         .arg(OUTPUT_TEMPLATE)
         .arg("download")
-        .arg(url)
+        .arg(query)
         .current_dir(output_dir);
     command
 }
@@ -433,6 +447,16 @@ mod tests {
     };
     use std::path::Path;
 
+    const PAIR: &str =
+        "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/abc123";
+
+    fn arguments(official_api: bool, token: Option<&str>) -> Vec<String> {
+        download_command("spotdl", Path::new("downloads"), PAIR, official_api, token)
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
     fn result(success: bool, output: &str) -> ProcessResult {
         ProcessResult {
             success,
@@ -475,18 +499,34 @@ mod tests {
     }
 
     #[test]
+    fn every_download_forces_mp3_and_synced_lyrics_for_the_exact_pair() {
+        let args = arguments(false, None);
+        let expected = [
+            "--overwrite",
+            "force",
+            "--format",
+            "mp3",
+            "--lyrics",
+            "synced",
+            "--generate-lrc",
+        ];
+        let start = args
+            .iter()
+            .position(|argument| argument == "--overwrite")
+            .expect("the overwrite policy is always passed");
+        assert_eq!(args[start..start + expected.len()], expected);
+
+        let download = args
+            .iter()
+            .position(|argument| argument == "download")
+            .expect("the download subcommand is always passed");
+        assert_eq!(args[download + 1], PAIR);
+        assert_eq!(args.len(), download + 2);
+    }
+
+    #[test]
     fn token_free_command_does_not_force_the_official_api() {
-        let command = download_command(
-            "spotdl",
-            Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
-            false,
-            None,
-        );
-        let args = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let args = arguments(false, None);
         assert!(!args.iter().any(|argument| argument == "--use-official-api"));
         assert!(!args.iter().any(|argument| argument == "--auth-token"));
         assert!(!args.iter().any(|argument| argument == "--use-cache-file"));
@@ -494,17 +534,7 @@ mod tests {
 
     #[test]
     fn official_command_is_an_explicit_opt_in_without_metadata_cache() {
-        let command = download_command(
-            "spotdl",
-            Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
-            true,
-            Some("secret-token"),
-        );
-        let args = command
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let args = arguments(true, Some("secret-token"));
         assert!(args.iter().any(|argument| argument == "--use-official-api"));
         assert!(args.iter().any(|argument| argument == "--auth-token"));
         assert!(args.iter().any(|argument| argument == "secret-token"));
@@ -513,13 +543,7 @@ mod tests {
 
     #[test]
     fn relative_spotdl_paths_survive_the_download_working_directory() {
-        let command = download_command(
-            "./tools/spotdl",
-            Path::new("downloads"),
-            "https://open.spotify.com/track/abc123",
-            false,
-            None,
-        );
+        let command = download_command("./tools/spotdl", Path::new("downloads"), PAIR, false, None);
         assert!(Path::new(command.get_program()).is_absolute());
     }
 

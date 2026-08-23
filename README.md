@@ -6,7 +6,7 @@ a local music library. One executable provides three related workflows:
 | Command | Purpose |
 |---|---|
 | `resolve` | Search Spotify for free-text track descriptions and write Spotify URLs |
-| `download` | Download a file of Spotify links through spotDL |
+| `download` | Download `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` pairs through spotDL and embed synced lyrics |
 | `delete` | Remove selected ID3 frames recursively |
 
 The Cargo package and executable are currently named `music-tag-transfer`.
@@ -20,7 +20,7 @@ Only download material you are permitted to keep.
 - [Quick start](#quick-start)
 - [Global usage](#global-usage)
 - [Resolve track descriptions](#resolve-track-descriptions)
-- [Download Spotify links](#download-spotify-links)
+- [Download exact-source pairs](#download-exact-source-pairs)
 - [Delete ID3 tags](#delete-id3-tags)
 - [Exit status](#exit-status)
 - [Troubleshooting](#troubleshooting)
@@ -35,6 +35,7 @@ The individual workflows have these additional requirements:
 |---|---|
 | `resolve` | A Spotify developer app and its Client ID/Client Secret |
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
+| Synced lyrics | Nothing extra; the SYLT frames are written by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
 
@@ -84,7 +85,31 @@ cargo run -- resolve tracks.txt spotify-links.txt
 
 ## Quick start
 
-The most useful end-to-end workflow is a two-step pipeline.
+`download` reads one exact-source pair per line, so the fastest path is to
+write those pairs yourself.
+
+1. Create `pairs.txt` with one `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair per
+   line:
+
+   ```text
+   https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW
+   https://music.youtube.com/watch?v=9bZkp7q19f0|https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql
+   ```
+
+2. Download them:
+
+   ```bash
+   music-tag-transfer download pairs.txt --output ./music
+   ```
+
+Every pair is downloaded as MP3 with synchronised lyrics, and each generated
+`.lrc` file is rewritten into an ID3v2.3 `SYLT` frame and then deleted.
+
+### Finding the Spotify half with `resolve`
+
+`resolve` turns free-text descriptions into Spotify track URLs. Its output is
+the right-hand half of each pair; add the YouTube Music URL and a `|` in front
+of each line before downloading.
 
 1. Create `tracks.txt` with one search description per line:
 
@@ -112,16 +137,25 @@ The most useful end-to-end workflow is a two-step pipeline.
    $env:SPOTIFY_CLIENT_SECRET = 'your-client-secret'
    ```
 
-3. Resolve the descriptions, then download the resulting URLs:
+3. Resolve the descriptions:
 
    ```bash
    music-tag-transfer resolve tracks.txt spotify-links.txt
-   music-tag-transfer download spotify-links.txt --output ./music
+   ```
+
+4. Put the YouTube Music URL you want as the audio source in front of each
+   resolved line, separated by `|`, and save the result as `pairs.txt`:
+
+   ```text
+   https://music.youtube.com/watch?v=fJ9rUzIMcZQ|https://open.spotify.com/track/3z8h0TU7ReDPLIbEnYhWZb
+   ```
+
+   ```bash
+   music-tag-transfer download pairs.txt --output ./music
    ```
 
 The resolver writes missing tracks and request failures as comments, and the
-downloader ignores comments. The output can therefore pass directly from one
-command to the next without manual cleanup.
+downloader ignores comments, so those lines can stay in the file.
 
 ## Global usage
 
@@ -199,7 +233,7 @@ silent wait.
 No-result lines are reported but do not make the command fail. Authentication,
 input/output, or per-line request errors produce exit status 1.
 
-## Download Spotify links
+## Download exact-source pairs
 
 ### Syntax
 
@@ -209,28 +243,34 @@ music-tag-transfer download [OPTIONS] <INPUT_FILE>
 
 ### Input format
 
-`INPUT_FILE` must be UTF-8 text with one Spotify URL or URI per line:
+`INPUT_FILE` must be UTF-8 text. Every non-empty line that does not begin with
+`#` must be one exact-source pair:
 
 ```text
 # Blank lines and comments are ignored
-https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW
-https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy?si=tracking
-spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
-https://spotify.link/AbCdEf
+https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW
+https://youtu.be/9bZkp7q19f0|spotify:track:03UrZgTINDqvnUMbbIMhql
 ```
 
-Supported content types are `track`, `album`, `playlist`, `artist`,
-`episode`, and `show`. The parser also accepts:
+This is spotDL's exact-source syntax. Nothing is left to a search: the URL
+before `|` pins the audio that is downloaded, and the URL after `|` pins the
+Spotify track whose metadata is written into the file.
 
-- `spotify:TYPE:ID` URIs;
-- `spotify.link` short links;
-- `open.spotify.com/intl-XX/...` locale paths;
-- `open.spotify.com/embed/...` paths;
-- HTTP links, which are normalized to HTTPS.
+The left-hand side accepts `music.youtube.com`, `www.youtube.com`,
+`youtube.com`, `m.youtube.com`, and `youtu.be` links. `/watch?v=ID` and
+`/playlist?list=ID` paths are supported; short `youtu.be/ID` links are expanded
+to `https://www.youtube.com/watch?v=ID`.
 
-Query strings and fragments are removed. Duplicate normalized links are
-downloaded only once. If any non-comment line is invalid, the command reports
-up to ten invalid lines and stops before starting spotDL.
+The right-hand side must be a Spotify **track**, either as an
+`open.spotify.com/track/ID` URL or a `spotify:track:ID` URI. `intl-XX` and
+`embed` path prefixes are removed and HTTP links are normalized to HTTPS.
+Album, playlist, artist, episode, show, and `spotify.link` URLs are rejected,
+because a pair describes exactly one track.
+
+Query strings and fragments are removed, so tracking parameters such as `si=`
+do not create duplicates. Duplicate normalized pairs are downloaded only once.
+If any non-comment line is invalid, the command reports up to ten invalid lines
+and stops before starting spotDL.
 
 ### Options
 
@@ -243,7 +283,7 @@ up to ten invalid lines and stops before starting spotDL.
 | `--token-file <FILE>` | Official mode: read the access token from a file |
 | `--non-interactive` | Never prompt for Deno or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--max-attempts <N>` | Network attempts per link; default `3`, minimum `1` |
+| `--max-attempts <N>` | Network attempts per pair; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 | `-h, --help` | Print download help |
 | `-V, --version` | Print the application version |
@@ -255,6 +295,93 @@ that starts with a hyphen.
 Set `SPOTDL_PROGRAM=/full/path/to/spotdl` to choose a spotDL executable
 without repeating `--spotdl`. An explicit `--spotdl` option takes
 precedence.
+
+### The spotDL command
+
+Each pair is passed to spotDL on its own, as a single quoted argument, so a
+failure can be attributed to the input line it came from:
+
+```bash
+spotdl download "YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL" \
+    --overwrite force --format mp3 --lyrics synced --generate-lrc
+```
+
+Those four options are fixed and are not configurable:
+
+| Option | Effect |
+|---|---|
+| `--overwrite force` | Every listed pair is downloaded again, replacing any existing file |
+| `--format mp3` | Output is always MP3, so an ID3 tag can always be written |
+| `--lyrics synced` | spotDL prefers a provider that has time-synced lyrics |
+| `--generate-lrc` | spotDL writes the timed lyrics next to the audio as `.lrc` |
+
+The command also passes `--print-errors`, `--max-retries 0` (retries are
+handled here instead), and spotDL's output template:
+
+```text
+{artists} - {title} [{track-id}].{output-ext}
+```
+
+Because `--overwrite force` is used, rerunning an input file re-downloads
+every pair in it rather than skipping finished files.
+
+### Synchronised lyrics as an ID3 `SYLT` frame
+
+spotDL does not write synchronised lyrics into the tag. `--lyrics synced` only
+embeds the plain text in a `USLT` frame, which has no timestamps, and
+`--generate-lrc` leaves the timed lyrics in a separate `.lrc` file.
+
+After each successful download this program closes that gap:
+
+1. Every `.lrc` file below the output directory is parsed. `[mm:ss.xx]`,
+   `[mm:ss]`, and `[hh:mm:ss.xxx]` timestamps are converted to milliseconds,
+   metadata tags such as `[ar:...]` are ignored, and a line carrying several
+   timestamps is repeated at each one.
+2. The lines are written to the matching audio file as an ID3v2.3 `SYLT`
+   frame: UTF-16 text, millisecond timestamp format, content type "lyrics",
+   language `eng`. Any previous `SYLT` frame is replaced.
+3. The now-redundant `USLT` frame is deleted.
+4. The file is read back from disk and the stored frame is compared with the
+   `.lrc` file. Only if it matches — and the `USLT` frame is really gone — is
+   the `.lrc` file deleted.
+
+The frame payload is written directly rather than through the `id3` crate's
+encoder, which appends a trailing NUL byte that is not in the ID3v2.3
+specification and makes strict parsers such as mutagen discard the whole
+frame.
+
+If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
+never the thing that gets lost, and the pair it belongs to is reported as
+failed so it appears in the retry list. Common causes are a `.lrc` file with
+no timestamped line at all and a `.lrc` file with no audio file next to it.
+A pair for which spotDL generated no `.lrc` file is reported but not failed:
+there were no synced lyrics to embed.
+
+### Download execution and output files
+
+The output directory receives:
+
+| File | Contents |
+|---|---|
+| `output.txt` | Failed and unattempted pairs, ready to retry |
+| `music-tag-transfer-download-failures.txt` | Detailed attempted failures and the stop reason |
+
+`output.txt` is always written; it is empty after a completely successful
+run. Because it holds the same pair syntax as the input, it can be passed
+straight back to `download`. The detailed failure report is written only when
+at least one attempted pair fails or causes the batch to stop.
+
+Ordinary network/service failures use exponential backoff up to
+`--max-attempts`. A short Spotify `Retry-After` delay is respected once.
+Application quota errors, repeated rate limits, or delays above
+`--max-rate-limit-wait` stop the batch and preserve the current and remaining
+pairs rather than rotating tokens or sleeping for a long time.
+
+If spotDL reports that Deno is required:
+
+- an interactive run asks before invoking `spotdl --download-deno`;
+- `--auto-download-deno` approves that setup automatically;
+- `--non-interactive` without automatic setup stops and preserves the pairs.
 
 ### Token-free and official API modes
 
@@ -269,7 +396,7 @@ Use the official API only as an explicit fallback:
 
 ```bash
 SPOTIFY_AUTH_TOKEN='short-lived-access-token' \
-  music-tag-transfer download --official-api spotify-links.txt
+  music-tag-transfer download --official-api pairs.txt
 ```
 
 Official-mode token precedence is:
@@ -285,41 +412,6 @@ tokens, cookies, Client Secrets, or other credentials.
 
 When an official token expires, an interactive terminal can request a
 replacement. `--non-interactive` disables this prompt.
-
-### Download execution and output files
-
-Each unique link is sent to spotDL separately so failures can be attributed to
-the original input line. Files use spotDL's template:
-
-```text
-{artists} - {title} [{track-id}].{output-ext}
-```
-
-The command always uses `--overwrite skip`, so rerunning the same input skips
-files spotDL considers complete.
-
-The output directory receives:
-
-| File | Contents |
-|---|---|
-| `output.txt` | Failed and unattempted URLs, ready to retry |
-| `music-tag-transfer-download-failures.txt` | Detailed attempted failures and the stop reason |
-
-`output.txt` is always written; it is empty after a completely successful
-run. The detailed failure report is written only when at least one attempted
-URL fails or causes the batch to stop.
-
-Ordinary network/service failures use exponential backoff up to
-`--max-attempts`. A short Spotify `Retry-After` delay is respected once.
-Application quota errors, repeated rate limits, or delays above
-`--max-rate-limit-wait` stop the batch and preserve the current and remaining
-URLs rather than rotating tokens or sleeping for a long time.
-
-If spotDL reports that Deno is required:
-
-- an interactive run asks before invoking `spotdl --download-deno`;
-- `--auto-download-deno` approves that setup automatically;
-- `--non-interactive` without automatic setup stops and preserves the URLs.
 
 ## Delete ID3 tags
 
@@ -410,8 +502,9 @@ same scan and reports the expected counts without writing files.
 | `1` | Invalid arguments, setup/input/output failure, download failures, resolver request errors, or per-file metadata errors |
 
 For `resolve`, a valid query with no Spotify result is not an error. For
-`download`, any failed or unattempted link results in status 1 and is
-preserved in `output.txt`.
+`download`, any failed or unattempted pair results in status 1 and is preserved
+in `output.txt`. A pair whose audio downloaded but whose synced lyrics could
+not be embedded counts as failed, and its `.lrc` file is kept.
 
 ## Troubleshooting
 
@@ -437,6 +530,25 @@ official mode.
 
 Run `spotdl --download-deno` manually, install Deno system-wide, or rerun the
 download command with `--auto-download-deno`.
+
+### A `.lrc` file was left behind
+
+Its lyrics could not be embedded, and the reason is printed during the run and
+recorded in `music-tag-transfer-download-failures.txt`. The usual cause is a
+`.lrc` file that contains no timestamped line. Retry the pair from
+`output.txt`, or delete the `.lrc` file yourself if the track simply has no
+synced lyrics.
+
+### A player shows no synced lyrics
+
+Confirm the frame is there, for example with mutagen:
+
+```bash
+python3 -c "from mutagen.id3 import ID3; print(ID3('track.mp3').getall('SYLT'))"
+```
+
+If the frame is present, the player does not support `SYLT`; many players read
+only the untimed `USLT` frame, which this program removes.
 
 ### Metadata commands find no files
 
@@ -469,9 +581,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`DeleteReport`, `FileError`, and `TagSpec` are also exported. The `cli`,
-`download`, and `resolve` modules expose the executable's command
-configuration and entry points.
+Synced lyrics can be embedded on their own, for a folder that already contains
+`.lrc` files:
+
+```rust
+use std::{collections::HashSet, path::Path};
+use music_tag_transfer::embed_synced_lyrics;
+
+fn main() -> Result<(), String> {
+    let report = embed_synced_lyrics(Path::new("/path/to/music"), &HashSet::new())?;
+    println!("Embedded {} file(s)", report.files_embedded);
+    for failure in &report.failures {
+        eprintln!("{}: {}", failure.path.display(), failure.message);
+    }
+    Ok(())
+}
+```
+
+`DeleteReport`, `LyricsReport`, `FileError`, and `TagSpec` are also exported.
+The `cli`, `download`, `lyrics`, and `resolve` modules expose the executable's
+command configuration and entry points.
 
 ## Development
 

@@ -184,7 +184,7 @@ fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
 
 pub fn help_text() -> String {
     format!(
-        "{package} download - download one Spotify link per line through spotDL
+        "{package} download - download one YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per line
 
 USAGE:
     {package} download [OPTIONS] <INPUT_FILE>
@@ -201,6 +201,24 @@ OPTIONS:
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
     -h, --help                        Print help
     -V, --version                     Print version
+
+INPUT FORMAT:
+    Every non-comment line must be an exact-source pair:
+
+        https://music.youtube.com/watch?v=VIDEO_ID|https://open.spotify.com/track/TRACK_ID
+
+    The left URL pins the audio spotDL downloads; the right URL supplies the
+    Spotify track metadata. Each pair runs as:
+
+        spotdl download \"PAIR\" --overwrite force --format mp3 \\
+              --lyrics synced --generate-lrc
+
+SYNCED LYRICS:
+    spotDL embeds only untimed USLT lyrics, so every generated .lrc file is
+    parsed into an ID3v2.3 SYLT frame with millisecond timestamps. The USLT
+    frame is removed, the frame is read back from the file to verify it, and
+    only then is the .lrc file deleted. If any of that fails, the .lrc file is
+    kept and the pair is added to the retry list.
 
 SPOTIFY MODE:
     The default uses spotDL's token-free client. --official-api is an explicit
