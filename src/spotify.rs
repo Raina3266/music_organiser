@@ -1,8 +1,9 @@
-//! Minimal Spotify Web API client used to fetch the copyright of a track.
+//! Minimal Spotify Web API client used to fetch the tags spotDL leaves out.
 //!
-//! Spotify exposes copyright only on the album object, so a lookup is a track
-//! request followed by an album request. Albums are cached, which makes a whole
-//! album's worth of tracks cost one album request.
+//! The track request carries the ISRC. Copyright is exposed only on the album
+//! object, so a lookup is a track request followed by an album request. Albums
+//! are cached, which makes a whole album's worth of tracks cost one album
+//! request.
 
 use std::collections::HashMap;
 use std::env;
@@ -43,18 +44,18 @@ impl Credentials {
 
         if !interactive {
             return Err(
-                "copyright lookups need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET. Set both, run from a terminal without --non-interactive so they can be typed in, or pass --no-copyright."
+                "copyright and ISRC lookups need SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET. Set both, run from a terminal without --non-interactive so they can be typed in, or pass --no-spotify-metadata."
                     .into(),
             );
         }
 
         eprintln!();
         eprintln!(
-            "Spotify credentials are needed to fetch the copyright of each track. Create an app at"
+            "Spotify credentials are needed to fetch the copyright and ISRC of each track. Create an app at"
         );
         eprintln!("https://developer.spotify.com/dashboard and paste its values below.");
         eprintln!(
-            "They are used only for this run and are never saved. Pass --no-copyright to skip."
+            "They are used only for this run and are never saved. Pass --no-spotify-metadata to skip."
         );
         let client_id = match client_id {
             Some(value) => value,
@@ -114,9 +115,30 @@ struct TokenResponse {
     access_token: String,
 }
 
+/// The facts this program stores in the tag but spotDL does not fill in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackMetadata {
+    /// The album's copyright message, for the `TCOP` frame.
+    pub copyright: Option<String>,
+    /// The recording's ISRC, for the `TSRC` frame.
+    pub isrc: Option<String>,
+}
+
+impl TrackMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.copyright.is_none() && self.isrc.is_none()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct TrackResponse {
     album: Option<AlbumReference>,
+    external_ids: Option<ExternalIds>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExternalIds {
+    isrc: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,22 +192,33 @@ impl Client {
         })
     }
 
-    /// The copyright message for `track_id`, or `None` when Spotify has none.
-    pub fn copyright(&mut self, track_id: &str) -> Result<Option<String>, String> {
-        let album_id = self
-            .runtime
-            .block_on(get::<TrackResponse>(
-                &self.http,
-                &self.token,
-                &format!("{API_BASE}/tracks/{track_id}"),
-            ))?
-            .album
-            .and_then(|album| album.id);
-        let Some(album_id) = album_id else {
-            return Ok(None);
-        };
+    /// The ISRC and copyright message for `track_id`.
+    ///
+    /// Either field is `None` when Spotify does not list it.
+    pub fn track_metadata(&mut self, track_id: &str) -> Result<TrackMetadata, String> {
+        let track = self.runtime.block_on(get::<TrackResponse>(
+            &self.http,
+            &self.token,
+            &format!("{API_BASE}/tracks/{track_id}"),
+        ))?;
+        let isrc = track
+            .external_ids
+            .and_then(|ids| ids.isrc)
+            .map(|isrc| isrc.trim().to_owned())
+            .filter(|isrc| !isrc.is_empty());
 
-        if let Some(cached) = self.albums.get(&album_id) {
+        let Some(album_id) = track.album.and_then(|album| album.id) else {
+            return Ok(TrackMetadata {
+                copyright: None,
+                isrc,
+            });
+        };
+        let copyright = self.album_copyright(&album_id)?;
+        Ok(TrackMetadata { copyright, isrc })
+    }
+
+    fn album_copyright(&mut self, album_id: &str) -> Result<Option<String>, String> {
+        if let Some(cached) = self.albums.get(album_id) {
             return Ok(cached.clone());
         }
         let album = self.runtime.block_on(get::<AlbumResponse>(
@@ -194,7 +227,7 @@ impl Client {
             &format!("{API_BASE}/albums/{album_id}"),
         ))?;
         let copyright = preferred_copyright(album.copyrights.unwrap_or_default());
-        self.albums.insert(album_id, copyright.clone());
+        self.albums.insert(album_id.to_owned(), copyright.clone());
         Ok(copyright)
     }
 }
@@ -320,7 +353,7 @@ fn one_line(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AlbumResponse, Credentials, preferred_copyright};
+    use super::{AlbumResponse, Credentials, TrackMetadata, TrackResponse, preferred_copyright};
 
     fn copyrights(json: &str) -> Vec<super::Copyright> {
         let album: AlbumResponse = serde_json::from_str(json).unwrap();
@@ -366,6 +399,46 @@ mod tests {
         assert_eq!(
             preferred_copyright(copyrights(r#"{"copyrights":[{"text":"   ","type":"C"}]}"#)),
             None
+        );
+    }
+
+    #[test]
+    fn reads_the_isrc_from_the_track_response() {
+        let track: TrackResponse = serde_json::from_str(
+            r#"{"album":{"id":"alb1"},"external_ids":{"isrc":" GBAYE0601498 "}}"#,
+        )
+        .unwrap();
+        let isrc = track
+            .external_ids
+            .and_then(|ids| ids.isrc)
+            .map(|isrc| isrc.trim().to_owned())
+            .filter(|isrc| !isrc.is_empty());
+        assert_eq!(isrc, Some("GBAYE0601498".to_owned()));
+
+        let without: TrackResponse = serde_json::from_str(r#"{"album":{"id":"alb1"}}"#).unwrap();
+        assert!(without.external_ids.is_none());
+
+        let blank: TrackResponse =
+            serde_json::from_str(r#"{"external_ids":{"isrc":"  "}}"#).unwrap();
+        assert!(
+            blank
+                .external_ids
+                .and_then(|ids| ids.isrc)
+                .map(|isrc| isrc.trim().to_owned())
+                .filter(|isrc| !isrc.is_empty())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn empty_metadata_is_recognised() {
+        assert!(TrackMetadata::default().is_empty());
+        assert!(
+            !TrackMetadata {
+                copyright: None,
+                isrc: Some("GBAYE0601498".to_owned()),
+            }
+            .is_empty()
         );
     }
 

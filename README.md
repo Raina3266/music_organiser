@@ -32,8 +32,8 @@ The individual workflows have these additional requirements:
 | Workflow | Additional requirements |
 |---|---|
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
-| Copyright lookup | A Spotify developer app and its Client ID/Client Secret |
-| Synced lyrics | Nothing extra; the SYLT frames are written by this program |
+| Copyright and ISRC | A Spotify developer app and its Client ID/Client Secret |
+| Synced lyrics and language | Nothing extra; both are handled by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
 
@@ -101,12 +101,12 @@ write those pairs yourself.
    ```
 
 Every pair is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
-tag is then rewritten: the `POPM` rating frame is removed, the `TCOP` copyright
-message is fetched from Spotify, and the generated `.lrc` file becomes a `SYLT`
-frame and is deleted.
+tag is then rewritten: the `POPM` rating frame is removed, `TCOP`, `TSRC`, and
+`TLAN` are filled in, and the generated `.lrc` file becomes a `SYLT` frame and
+is deleted.
 
-The copyright lookup needs a Spotify app's Client ID and Client Secret. Export
-them, and the run will not stop to ask:
+The copyright and ISRC lookups need a Spotify app's Client ID and Client
+Secret. Export them, and the run will not stop to ask:
 
 ```bash
 export SPOTIFY_CLIENT_ID='your-client-id'
@@ -114,7 +114,7 @@ export SPOTIFY_CLIENT_SECRET='your-client-secret'
 ```
 
 Otherwise the command prompts for both before downloading anything. Pass
-`--no-copyright` to skip the lookup entirely.
+`--no-spotify-metadata` to skip the lookup entirely.
 
 ## Global usage
 
@@ -186,14 +186,15 @@ and stops before starting spotDL.
 | `--token-file <FILE>` | Official mode: read the access token from a file |
 | `--non-interactive` | Never prompt for Deno or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-copyright` | Skip the Spotify copyright lookup instead of asking for credentials |
+| `--no-spotify-metadata` | Skip the Spotify copyright/ISRC lookup instead of asking for credentials |
+| `--language <CODE>` | Fallback ISO-639-2 language for `TLAN`; default `eng` |
 | `--max-attempts <N>` | Network attempts per pair; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 | `-h, --help` | Print download help |
 | `-V, --version` | Print the application version |
 
-`--output=...`, `--spotdl=...`, `--auth-token=...`, and
-`--token-file=...` are also accepted. Use `--` before an input filename
+`--output=...`, `--spotdl=...`, `--auth-token=...`, `--token-file=...`, and
+`--language=...` are also accepted. Use `--` before an input filename
 that starts with a hyphen.
 
 Set `SPOTDL_PROGRAM=/full/path/to/spotdl` to choose a spotDL executable
@@ -229,23 +230,31 @@ handled here instead), and spotDL's output template:
 Because `--overwrite force` is used, rerunning an input file re-downloads
 every pair in it rather than skipping finished files.
 
-### Rating and copyright frames
+### Rating, copyright, ISRC, and language frames
 
 spotDL writes a `POPM` popularimeter frame from Spotify's popularity score —
-the frame most taggers display as the track's rating — and leaves the `TCOP`
-copyright message empty, because a single-track fetch does not carry the
-album's copyright.
+the frame most taggers display as the track's rating — and leaves `TCOP` empty,
+because a single-track fetch does not carry the album's copyright.
 
-After each download this program fixes both:
+After each download this program rewrites four frames:
 
-- the `POPM` frame is removed outright;
-- the `TCOP` frame is set to the copyright message fetched from Spotify.
+| Frame | What happens |
+|---|---|
+| `POPM` | Removed outright |
+| `TCOP` | Set to the copyright message fetched from Spotify |
+| `TSRC` | Set to the ISRC fetched from Spotify |
+| `TLAN` | Set to the language detected from the lyrics, or `--language` |
 
+When Spotify lists no value for `TCOP` or `TSRC`, that frame is left alone and
+the run says so rather than storing something invented.
+
+#### Where the values come from
+
+The ISRC rides along on the track request, so it costs nothing extra.
 Copyright exists only on Spotify's album object, so a lookup is a track request
 followed by an album request. Albums are cached, so a whole album's worth of
 pairs costs one album request. When an album lists both a `C` copyright and a
-`P` phonogram entry, the `C` entry wins; when Spotify lists no copyright at
-all, the frame is left alone and the run says so.
+`P` phonogram entry, the `C` entry wins.
 
 The lookup uses the client-credentials flow and needs a Spotify developer app:
 
@@ -257,8 +266,28 @@ The lookup uses the client-credentials flow and needs a Spotify developer app:
 If either is missing, the command prompts for it before downloading anything,
 so a long run never stops halfway to ask. The values are used only for that run
 and are never written to disk. With `--non-interactive` there is nothing to
-prompt, so the command stops and names the two variables. `--no-copyright`
-skips the lookup and the `TCOP` frame entirely.
+prompt, so the command stops and names the two variables.
+`--no-spotify-metadata` skips the lookup, and with it `TCOP` and `TSRC`.
+
+#### Language
+
+Spotify does not expose a language for tracks — only shows and episodes carry
+one — so `TLAN` cannot be fetched the way copyright and ISRC are. The synced
+lyrics are the only evidence available, and the language is detected from their
+text.
+
+- A confident detection sets `TLAN`, and the `SYLT` frame's own language field
+  is set to match.
+- Too little text, or an unreliable guess, falls back to `--language`
+  (default `eng`) rather than recording something invented. Two or more
+  non-blank lyric lines are required before a guess is even attempted.
+- A track with no `.lrc` file has nothing to detect from, so it gets
+  `--language` too.
+
+`TLAN` is written even with `--no-spotify-metadata`, because it never came
+from Spotify. The detector reports ISO-639-3, which for every individual
+language it knows is the same as the ISO-639-2/T code ID3v2.3 asks for; the two
+macrolanguage cases are mapped (`cmn` becomes `zho`, `pes` becomes `fas`).
 
 ### Synchronised lyrics as an ID3 `SYLT` frame
 
@@ -458,12 +487,12 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 `load_config`, or clear the official-API settings named in the error. Use
 `--official-api` only when that mode is intentional.
 
-### Spotify authentication for copyright fails
+### Spotify authentication for copyright/ISRC fails
 
 Confirm `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` belong to the same
 Spotify developer app. These are app credentials and are different from
 `SPOTIFY_AUTH_TOKEN`, which is used only by the downloader's optional
-official mode. Run with `--no-copyright` to download without them.
+official mode. Run with `--no-spotify-metadata` to download without them.
 
 ### A download needs Deno
 
@@ -525,10 +554,18 @@ The same metadata rules can be applied to a single file that already has a
 
 ```rust
 use std::path::Path;
-use music_tag_transfer::finalize;
+use music_tag_transfer::{finalize, spotify::TrackMetadata};
 
 fn main() {
-    let report = finalize(Path::new("/path/to/Artist - Song [id].mp3"), Some("2013 Some Label"));
+    let remote = TrackMetadata {
+        copyright: Some("2013 Some Label".to_owned()),
+        isrc: Some("GBAYE0601498".to_owned()),
+    };
+    let report = finalize(
+        Path::new("/path/to/Artist - Song [id].mp3"),
+        &remote,
+        "eng",
+    );
     println!(
         "Removed {} rating frame(s), embedded {} line(s)",
         report.ratings_removed, report.lines_embedded

@@ -9,7 +9,7 @@ use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::music_files_for_track;
 use crate::metadata::{self, MetadataReport};
-use crate::spotify::{Client as SpotifyClient, Credentials};
+use crate::spotify::{Client as SpotifyClient, Credentials, TrackMetadata};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -78,12 +78,12 @@ pub fn run(config: Config) -> Result<i32, String> {
     }
 
     let interactive = !config.non_interactive && io::stdin().is_terminal();
-    let mut spotify = if config.no_copyright {
-        println!("Copyright lookup: disabled with --no-copyright.");
+    let mut spotify = if config.no_spotify_metadata {
+        println!("Spotify metadata lookup: disabled with --no-spotify-metadata.");
         None
     } else {
         let credentials = Credentials::resolve(interactive)?;
-        println!("Authenticating with the Spotify Web API for copyright lookups...");
+        println!("Authenticating with the Spotify Web API for copyright and ISRC lookups...");
         Some(SpotifyClient::connect(&credentials)?)
     };
     let mut auth_token = initial_token(&config)?;
@@ -127,10 +127,15 @@ pub fn run(config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s).",
+        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s) and {} ISRC(s).",
         metadata_totals.files_updated,
         metadata_totals.ratings_removed,
-        metadata_totals.copyrights_written
+        metadata_totals.copyrights_written,
+        metadata_totals.isrcs_written
+    );
+    println!(
+        "Language: detected from the lyrics for {} of {} file(s); the rest use {}.",
+        metadata_totals.languages_detected, metadata_totals.files_updated, config.language
     );
     println!(
         "Synced lyrics: embedded {} file(s) as SYLT ({} line(s)); removed {} USLT frame(s).",
@@ -191,21 +196,24 @@ fn apply_metadata(
     spotify: Option<&mut SpotifyClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
-    let copyright = match spotify {
-        Some(client) => match client.copyright(&entry.track_id) {
-            Ok(copyright) => {
-                if copyright.is_none() {
+    let remote = match spotify {
+        Some(client) => match client.track_metadata(&entry.track_id) {
+            Ok(remote) => {
+                if remote.copyright.is_none() {
                     println!("Spotify lists no copyright for this track.");
                 }
-                copyright
+                if remote.isrc.is_none() {
+                    println!("Spotify lists no ISRC for this track.");
+                }
+                remote
             }
             Err(error) => {
                 return EntryOutcome::Failed(format!(
-                    "the audio downloaded but its copyright could not be fetched: {error}"
+                    "the audio downloaded but its Spotify metadata could not be fetched: {error}"
                 ));
             }
         },
-        None => None,
+        None => TrackMetadata::default(),
     };
 
     let files = match music_files_for_track(&config.output, &entry.track_id) {
@@ -227,7 +235,7 @@ fn apply_metadata(
 
     let mut report = MetadataReport::default();
     for file in &files {
-        report.absorb(metadata::finalize(file, copyright.as_deref()));
+        report.absorb(metadata::finalize(file, &remote, &config.language));
     }
 
     let reasons = report
@@ -247,9 +255,14 @@ fn apply_metadata(
         } else {
             String::new()
         };
+        let language = if report.languages_detected > 0 {
+            "detected from the lyrics"
+        } else {
+            "taken from --language"
+        };
         println!(
-            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s){lyrics}.",
-            report.ratings_removed, report.copyrights_written
+            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s) and {} ISRC(s), language {language}{lyrics}.",
+            report.ratings_removed, report.copyrights_written, report.isrcs_written
         );
     }
 

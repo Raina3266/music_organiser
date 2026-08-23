@@ -1,6 +1,9 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+/// ISO-639-2 code used when the lyrics cannot settle the language.
+const DEFAULT_LANGUAGE: &str = "eng";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub input: PathBuf,
@@ -11,8 +14,10 @@ pub struct Config {
     pub token_file: Option<PathBuf>,
     pub non_interactive: bool,
     pub auto_download_deno: bool,
-    /// Skip the Spotify copyright lookup instead of asking for credentials.
-    pub no_copyright: bool,
+    /// Skip the Spotify metadata lookup instead of asking for credentials.
+    pub no_spotify_metadata: bool,
+    /// ISO-639-2 code recorded when the lyrics cannot settle the language.
+    pub language: String,
     pub max_attempts: u32,
     pub max_rate_limit_wait: u64,
 }
@@ -37,7 +42,8 @@ where
     let mut token_file = None;
     let mut non_interactive = false;
     let mut auto_download_deno = false;
-    let mut no_copyright = false;
+    let mut no_spotify_metadata = false;
+    let mut language = DEFAULT_LANGUAGE.to_owned();
     let mut max_attempts = 3;
     let mut max_rate_limit_wait = 300;
 
@@ -50,7 +56,8 @@ where
             "--official-api" => official_api = true,
             "--non-interactive" => non_interactive = true,
             "--auto-download-deno" => auto_download_deno = true,
-            "--no-copyright" => no_copyright = true,
+            "--no-spotify-metadata" => no_spotify_metadata = true,
+            "--language" => language = next_value(&args, &mut index, argument)?,
             "-o" | "--output" => {
                 output = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
             }
@@ -88,6 +95,9 @@ where
             _ if argument.starts_with("--token-file=") => {
                 token_file = Some(PathBuf::from(&argument["--token-file=".len()..]));
             }
+            _ if argument.starts_with("--language=") => {
+                language = argument["--language=".len()..].to_owned();
+            }
             _ if argument.starts_with('-') => {
                 return Err(format!(
                     "unknown option: {argument}\n\nRun with --help for usage."
@@ -114,6 +124,7 @@ where
         return Err("--spotdl cannot be empty".into());
     }
     validate_official_options(official_api, auth_token.as_deref(), token_file.as_deref())?;
+    let language = validate_language(&language)?;
 
     Ok(ParsedCommand::Run(Config {
         input,
@@ -124,10 +135,22 @@ where
         token_file,
         non_interactive,
         auto_download_deno,
-        no_copyright,
+        no_spotify_metadata,
+        language,
         max_attempts,
         max_rate_limit_wait,
     }))
+}
+
+/// ID3v2.3 records the language as a three-letter ISO-639-2 code.
+fn validate_language(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.len() != 3 || !value.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Err(format!(
+            "--language expects a three-letter ISO-639-2 code such as {DEFAULT_LANGUAGE}, not {value:?}"
+        ));
+    }
+    Ok(value.to_ascii_lowercase())
 }
 
 fn validate_official_options(
@@ -202,7 +225,8 @@ OPTIONS:
         --token-file <FILE>           Official mode: read an access token from a file
         --non-interactive             Never prompt for Deno or an expired official token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
-        --no-copyright                Skip the Spotify copyright lookup entirely
+        --no-spotify-metadata         Skip the Spotify copyright/ISRC lookup entirely
+        --language <CODE>             Fallback ISO-639-2 language [default: eng]
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
     -h, --help                        Print help
@@ -220,13 +244,19 @@ INPUT FORMAT:
               --lyrics synced --generate-lrc
 
 METADATA:
-    After each download the ID3v2.3 tag is rewritten: the POPM rating frame
-    spotDL writes from Spotify's popularity score is removed, and the TCOP
-    copyright message is fetched from the Spotify Web API and stored.
+    After each download the ID3v2.3 tag is rewritten:
+
+        POPM   the rating frame spotDL writes from Spotify's popularity
+               score is removed
+        TCOP   the copyright message, fetched from the Spotify Web API
+        TSRC   the ISRC, fetched from the Spotify Web API
+        TLAN   the language, detected from the synced lyrics, falling back
+               to --language when the lyrics do not settle it
 
     The lookup needs a Spotify app's Client ID and Client Secret. They are read
     from SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET, or typed in at the start
-    of the run. Use --no-copyright to skip the lookup.
+    of the run. Use --no-spotify-metadata to skip it; TLAN is still written
+    because it does not come from Spotify.
 
 SYNCED LYRICS:
     spotDL embeds only untimed USLT lyrics, so every generated .lrc file is
@@ -241,8 +271,8 @@ SPOTIFY MODE:
 
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path
-    SPOTIFY_CLIENT_ID                 Spotify app client ID, for copyright
-    SPOTIFY_CLIENT_SECRET             Spotify app client secret, for copyright
+    SPOTIFY_CLIENT_ID                 Spotify app client ID, for TCOP/TSRC
+    SPOTIFY_CLIENT_SECRET             Spotify app client secret, for TCOP/TSRC
 
 Blank lines and lines beginning with # are ignored.",
         package = env!("CARGO_PKG_NAME")
@@ -251,7 +281,7 @@ Blank lines and lines beginning with # are ignored.",
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_positive_u32, set_input, validate_official_options};
+    use super::{parse_positive_u32, set_input, validate_language, validate_official_options};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -266,6 +296,15 @@ mod tests {
         set_input(&mut input, "a.txt").unwrap();
         assert_eq!(input, Some(PathBuf::from("a.txt")));
         assert!(set_input(&mut input, "b.txt").is_err());
+    }
+
+    #[test]
+    fn language_must_be_a_three_letter_code() {
+        assert_eq!(validate_language("JPN").unwrap(), "jpn");
+        assert_eq!(validate_language(" fra ").unwrap(), "fra");
+        assert!(validate_language("en").is_err());
+        assert!(validate_language("english").is_err());
+        assert!(validate_language("e1g").is_err());
     }
 
     #[test]

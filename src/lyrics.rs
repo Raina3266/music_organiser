@@ -9,10 +9,10 @@ use id3::{
     frame::{SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat, Unknown},
 };
 
-/// ISO-639-2 language recorded in the SYLT frame. `.lrc` files carry no
-/// language of their own, and the frame requires three letters.
-pub(crate) const LYRICS_LANGUAGE: &str = "eng";
 pub(crate) const LYRICS_DESCRIPTION: &str = "";
+/// Detection below this confidence is ignored in favour of the configured
+/// default; short or mixed-script lyrics are easy to guess wrong.
+const MIN_DETECTION_LINES: usize = 2;
 /// SYLT text encoding `$01`: UTF-16 with a byte-order mark, which ID3v2.3
 /// allows and which keeps non-Latin lyrics intact.
 const SYLT_ENCODING_UTF16: u8 = 0x01;
@@ -20,9 +20,15 @@ const UTF16_BOM: [u8; 2] = [0xFF, 0xFE];
 const UTF16_TERMINATOR: [u8; 2] = [0x00, 0x00];
 
 /// Build the `SynchronisedLyrics` value for a parsed `.lrc` file.
-pub(crate) fn synchronised_lyrics(content: Vec<(u32, String)>) -> SynchronisedLyrics {
+///
+/// `language` is the ISO-639-2 code recorded in the frame; `.lrc` files carry
+/// no language of their own.
+pub(crate) fn synchronised_lyrics(
+    content: Vec<(u32, String)>,
+    language: &str,
+) -> SynchronisedLyrics {
     SynchronisedLyrics {
-        lang: LYRICS_LANGUAGE.to_owned(),
+        lang: language.to_owned(),
         timestamp_format: TimestampFormat::Ms,
         content_type: SynchronisedLyricsType::Lyrics,
         description: LYRICS_DESCRIPTION.to_owned(),
@@ -79,6 +85,44 @@ fn push_utf16_string(data: &mut Vec<u8>, text: &str) {
         data.extend_from_slice(&unit.to_le_bytes());
     }
     data.extend_from_slice(&UTF16_TERMINATOR);
+}
+
+/// Guess the ISO-639-2 language of a parsed `.lrc` file.
+///
+/// Spotify does not expose a track's language, so the lyrics themselves are the
+/// only evidence available. `None` means the guess was unreliable — too little
+/// text, or a script the detector could not place — and the caller should fall
+/// back to its configured default rather than record something invented.
+pub(crate) fn detect_language(content: &[(u32, String)]) -> Option<String> {
+    let text = content
+        .iter()
+        .map(|(_, line)| line.as_str())
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if text.len() < MIN_DETECTION_LINES {
+        return None;
+    }
+
+    let info = whatlang::detect(&text.join("\n"))?;
+    if !info.is_reliable() {
+        return None;
+    }
+    Some(iso_639_2(info.lang().code()).to_owned())
+}
+
+/// Translate the detector's ISO-639-3 code into one ID3v2.3 accepts.
+///
+/// ID3v2.3 asks for ISO-639-2, and the terminological (`639-2/T`) codes are
+/// identical to ISO-639-3 for every individual language the detector reports.
+/// Only the macrolanguages need mapping onto their collective code.
+fn iso_639_2(code: &str) -> &str {
+    match code {
+        // Mandarin -> Chinese
+        "cmn" => "zho",
+        // Western Persian -> Persian
+        "pes" => "fas",
+        other => other,
+    }
 }
 
 /// Parse LRC text into `(milliseconds, line)` pairs sorted by time.
@@ -207,8 +251,40 @@ mod tests {
     }
 
     #[test]
+    fn detects_the_language_of_the_lyrics() {
+        let english = parse_lrc(
+            "[00:01.00]We are the champions my friends\n[00:05.00]And we will keep on fighting till the end\n[00:09.00]We are the champions of the world\n",
+        );
+        assert_eq!(detect_language(&english).as_deref(), Some("eng"));
+
+        let french = parse_lrc(
+            "[00:01.00]Je te promets le trone d or et la lumiere\n[00:05.00]Je te promets la liberte et je te donne\n[00:09.00]Toute ma vie je te promets tout mon amour\n",
+        );
+        assert_eq!(detect_language(&french).as_deref(), Some("fra"));
+    }
+
+    #[test]
+    fn refuses_to_guess_from_too_little_text() {
+        assert_eq!(detect_language(&[]), None);
+        assert_eq!(detect_language(&[(0, "oh".to_owned())]), None);
+        // Blank interlude markers are not evidence of anything.
+        assert_eq!(
+            detect_language(&[(0, String::new()), (1_000, "  ".to_owned())]),
+            None
+        );
+    }
+
+    #[test]
+    fn maps_macrolanguages_onto_iso_639_2() {
+        assert_eq!(iso_639_2("cmn"), "zho");
+        assert_eq!(iso_639_2("pes"), "fas");
+        assert_eq!(iso_639_2("jpn"), "jpn");
+        assert_eq!(iso_639_2("deu"), "deu");
+    }
+
+    #[test]
     fn encodes_a_spec_shaped_sylt_payload_without_a_trailing_nul() {
-        let data = encode_sylt(&synchronised_lyrics(vec![(1_000, "hi".to_owned())]));
+        let data = encode_sylt(&synchronised_lyrics(vec![(1_000, "hi".to_owned())], "eng"));
 
         let expected = [
             &[0x01][..],
