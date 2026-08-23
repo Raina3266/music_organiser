@@ -14,8 +14,8 @@ pub struct Config {
     pub token_file: Option<PathBuf>,
     pub non_interactive: bool,
     pub auto_download_deno: bool,
-    /// Skip the Spotify metadata lookup instead of asking for credentials.
-    pub no_spotify_metadata: bool,
+    /// Skip the iTunes copyright lookup.
+    pub no_copyright: bool,
     /// ISO-639-2 code recorded when the lyrics cannot settle the language.
     pub language: String,
     pub max_attempts: u32,
@@ -42,7 +42,7 @@ where
     let mut token_file = None;
     let mut non_interactive = false;
     let mut auto_download_deno = false;
-    let mut no_spotify_metadata = false;
+    let mut no_copyright = false;
     let mut language = DEFAULT_LANGUAGE.to_owned();
     let mut max_attempts = 3;
     let mut max_rate_limit_wait = 300;
@@ -56,7 +56,7 @@ where
             "--official-api" => official_api = true,
             "--non-interactive" => non_interactive = true,
             "--auto-download-deno" => auto_download_deno = true,
-            "--no-spotify-metadata" => no_spotify_metadata = true,
+            "--no-copyright" => no_copyright = true,
             "--language" => language = next_value(&args, &mut index, argument)?,
             "-o" | "--output" => {
                 output = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
@@ -135,7 +135,7 @@ where
         token_file,
         non_interactive,
         auto_download_deno,
-        no_spotify_metadata,
+        no_copyright,
         language,
         max_attempts,
         max_rate_limit_wait,
@@ -225,7 +225,7 @@ OPTIONS:
         --token-file <FILE>           Official mode: read an access token from a file
         --non-interactive             Never prompt for Deno or an expired official token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
-        --no-spotify-metadata         Skip the Spotify copyright/ISRC lookup entirely
+        --no-copyright                Skip the iTunes copyright lookup entirely
         --language <CODE>             Fallback ISO-639-2 language [default: eng]
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
@@ -256,15 +256,17 @@ METADATA:
 
         POPM   the rating frame spotDL writes from Spotify's popularity
                score is removed
-        TCOP   the copyright message, fetched from the Spotify Web API
-        TSRC   the ISRC, fetched from the Spotify Web API
+        TCOP   the copyright message, looked up per album on the iTunes
+               Search API, which needs no account, key, or token
         TLAN   the language, detected from the synced lyrics, falling back
                to --language when the lyrics do not settle it
 
-    The lookup needs a Spotify app's Client ID and Client Secret. They are read
-    from SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET, or typed in at the start
-    of the run. Use --no-spotify-metadata to skip it; TLAN is still written
-    because it does not come from Spotify.
+    TSRC is left exactly as spotDL wrote it. iTunes publishes no ISRCs, and
+    spotDL already fills that frame from its own metadata.
+
+    A copyright is stored only when an iTunes album matches both the album
+    artist and the album name in the tag, so a wrong one is never written.
+    Use --no-copyright to skip the lookup.
 
 SYNCED LYRICS:
     spotDL embeds only untimed USLT lyrics, so every generated .lrc file is
@@ -279,8 +281,6 @@ SPOTIFY MODE:
 
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path
-    SPOTIFY_CLIENT_ID                 Spotify app client ID, for TCOP/TSRC
-    SPOTIFY_CLIENT_SECRET             Spotify app client secret, for TCOP/TSRC
 
 Blank lines and lines beginning with # are ignored.",
         package = env!("CARGO_PKG_NAME")

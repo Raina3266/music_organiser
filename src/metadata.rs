@@ -2,10 +2,13 @@
 //!
 //! Each downloaded file gets one tag update that: drops the `POPM`
 //! popularimeter frame spotDL writes from Spotify's popularity score, sets the
-//! `TCOP` copyright message and `TSRC` ISRC fetched from the Spotify Web API,
-//! records the `TLAN` language, and turns the `.lrc` sidecar into a `SYLT`
-//! frame while removing the untimed `USLT` one. The result is read back from
-//! disk before the `.lrc` file is deleted.
+//! `TCOP` copyright message fetched from the iTunes Search API, records the
+//! `TLAN` language, and turns the `.lrc` sidecar into a `SYLT` frame while
+//! removing the untimed `USLT` one. The result is read back from disk before
+//! the `.lrc` file is deleted.
+//!
+//! The `TSRC` ISRC frame is deliberately left as spotDL wrote it: iTunes does
+//! not publish ISRCs, and spotDL already fills the frame from its own metadata.
 
 use std::{
     fs,
@@ -19,7 +22,6 @@ use id3::{
 
 use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
 use crate::lyrics::{detect_language, parse_lrc, sylt_frame, synchronised_lyrics};
-use crate::spotify::TrackMetadata;
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
 const TAG_VERSION: Version = Version::Id3v23;
@@ -27,8 +29,6 @@ const TAG_VERSION: Version = Version::Id3v23;
 const RATING_FRAME: &str = "POPM";
 /// The copyright message frame.
 const COPYRIGHT_FRAME: &str = "TCOP";
-/// The International Standard Recording Code frame.
-const ISRC_FRAME: &str = "TSRC";
 /// The language frame, an ISO-639-2 code.
 const LANGUAGE_FRAME: &str = "TLAN";
 
@@ -40,8 +40,9 @@ pub struct MetadataReport {
     pub ratings_removed: usize,
     /// Files that received a `TCOP` copyright message.
     pub copyrights_written: usize,
-    /// Files that received a `TSRC` ISRC.
-    pub isrcs_written: usize,
+    /// Files whose copyright lookup failed outright. The rest of the tag is
+    /// still rewritten, so this is a warning rather than a failure.
+    pub copyright_lookups_failed: usize,
     /// Files whose `TLAN` language was detected from their lyrics rather than
     /// taken from the configured default.
     pub languages_detected: usize,
@@ -60,7 +61,7 @@ impl MetadataReport {
         self.files_updated += other.files_updated;
         self.ratings_removed += other.ratings_removed;
         self.copyrights_written += other.copyrights_written;
-        self.isrcs_written += other.isrcs_written;
+        self.copyright_lookups_failed += other.copyright_lookups_failed;
         self.languages_detected += other.languages_detected;
         self.lyrics_embedded += other.lyrics_embedded;
         self.lines_embedded += other.lines_embedded;
@@ -78,13 +79,12 @@ impl MetadataReport {
 
 /// Apply the download-time metadata rules to one audio file.
 ///
-/// `remote` carries the values fetched from Spotify; a field left as `None` is
-/// one Spotify does not list, and the matching frame is left alone.
-/// `default_language` is the ISO-639-2 code to record when the lyrics are not
-/// enough to detect one. Any `.lrc` file sitting next to `audio` is embedded
-/// and then deleted, but only after the whole tag has been read back and
-/// checked.
-pub fn finalize(audio: &Path, remote: &TrackMetadata, default_language: &str) -> MetadataReport {
+/// `copyright` is the message to store, or `None` when no album matched, in
+/// which case the frame is left alone. `default_language` is the ISO-639-2
+/// code to record when the lyrics are not enough to detect one. Any `.lrc`
+/// file sitting next to `audio` is embedded and then deleted, but only after
+/// the whole tag has been read back and checked.
+pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -> MetadataReport {
     let mut report = MetadataReport::default();
 
     let mut tag = match Tag::read_from_path(audio) {
@@ -132,8 +132,7 @@ pub fn finalize(audio: &Path, remote: &TrackMetadata, default_language: &str) ->
 
     let ratings_removed = tag.remove(RATING_FRAME).len();
     let uslt_removed = tag.lyrics().count();
-    set_text(&mut tag, COPYRIGHT_FRAME, remote.copyright.as_deref());
-    set_text(&mut tag, ISRC_FRAME, remote.isrc.as_deref());
+    set_text(&mut tag, COPYRIGHT_FRAME, copyright);
     set_text(&mut tag, LANGUAGE_FRAME, Some(language.as_str()));
     if let Some(lyrics) = &lyrics {
         tag.remove_all_synchronised_lyrics();
@@ -149,7 +148,7 @@ pub fn finalize(audio: &Path, remote: &TrackMetadata, default_language: &str) ->
         return report;
     }
 
-    if let Err(reason) = verify(audio, remote, &language, lyrics.as_ref()) {
+    if let Err(reason) = verify(audio, copyright, &language, lyrics.as_ref()) {
         report.fail(audio.to_path_buf(), reason);
         return report;
     }
@@ -171,10 +170,22 @@ pub fn finalize(audio: &Path, remote: &TrackMetadata, default_language: &str) ->
 
     report.files_updated = 1;
     report.ratings_removed = ratings_removed;
-    report.copyrights_written = usize::from(remote.copyright.is_some());
-    report.isrcs_written = usize::from(remote.isrc.is_some());
+    report.copyrights_written = usize::from(copyright.is_some());
     report.languages_detected = usize::from(detected);
     report
+}
+
+/// The album artist and album name recorded in a file's tag.
+///
+/// This is what the iTunes lookup searches with, so it comes from the tag
+/// spotDL just wrote rather than from the input pair. `TPE2` is preferred over
+/// `TPE1` because a compilation's tracks share an album artist but not a track
+/// artist.
+pub fn album_of(audio: &Path) -> Option<(String, String)> {
+    let tag = Tag::read_from_path(audio).ok()?;
+    let artist = tag.album_artist().or_else(|| tag.artist())?.trim();
+    let album = tag.album()?.trim();
+    (!artist.is_empty() && !album.is_empty()).then(|| (artist.to_owned(), album.to_owned()))
 }
 
 /// Replace a text frame, leaving it untouched when there is no value to store.
@@ -192,7 +203,7 @@ fn set_text(tag: &mut Tag, frame_id: &str, value: Option<&str>) {
 /// Read `audio` back from disk and confirm every rule actually took effect.
 fn verify(
     audio: &Path,
-    remote: &TrackMetadata,
+    copyright: Option<&str>,
     language: &str,
     lyrics: Option<&SynchronisedLyrics>,
 ) -> Result<(), String> {
@@ -204,12 +215,7 @@ fn verify(
     }
 
     for (frame_id, expected, label) in [
-        (
-            COPYRIGHT_FRAME,
-            remote.copyright.as_deref(),
-            "copyright message",
-        ),
-        (ISRC_FRAME, remote.isrc.as_deref(), "ISRC"),
+        (COPYRIGHT_FRAME, copyright, "copyright message"),
         (LANGUAGE_FRAME, Some(language), "language"),
     ] {
         let Some(expected) = expected else {
@@ -267,19 +273,19 @@ mod tests {
         }
     }
 
-    fn remote(copyright: Option<&str>, isrc: Option<&str>) -> TrackMetadata {
-        TrackMetadata {
-            copyright: copyright.map(str::to_owned),
-            isrc: isrc.map(str::to_owned),
-        }
-    }
-
     /// A file tagged the way spotDL leaves it: a rating, untimed lyrics, and an
     /// empty copyright message.
     fn write_spotdl_style_audio(path: &Path) {
         fs::write(path, b"").unwrap();
         let mut tag = Tag::new();
         tag.set_title("Song");
+        tag.set_album("Discovery");
+        tag.set_album_artist("Daft Punk");
+        // spotDL fills the ISRC itself; this program must not disturb it.
+        tag.add_frame(Frame::with_content(
+            "TSRC",
+            Content::Text("GBAYE0601498".to_owned()),
+        ));
         tag.add_frame(Popularimeter {
             user: "spotdl@spotdl".to_owned(),
             rating: 0,
@@ -309,16 +315,11 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(
-            &audio,
-            &remote(Some("2013 Daft Life Ltd."), Some("GBAYE0601498")),
-            "eng",
-        );
+        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
         assert_eq!(report.ratings_removed, 1);
         assert_eq!(report.copyrights_written, 1);
-        assert_eq!(report.isrcs_written, 1);
         assert_eq!(report.lyrics_embedded, 1);
         assert_eq!(report.lines_embedded, 2);
         assert_eq!(report.uslt_frames_removed, 1);
@@ -328,10 +329,11 @@ mod tests {
         assert!(tag.get(RATING_FRAME).is_none());
         assert_eq!(
             tag.get(COPYRIGHT_FRAME).and_then(|f| f.content().text()),
-            Some("2013 Daft Life Ltd.")
+            Some("\u{2117} 2001 Daft Life Limited")
         );
+        // spotDL's own ISRC survives untouched.
         assert_eq!(
-            tag.get(ISRC_FRAME).and_then(|f| f.content().text()),
+            tag.get("TSRC").and_then(|f| f.content().text()),
             Some("GBAYE0601498")
         );
         // Two short lyric lines are not enough to detect from, so the default
@@ -354,17 +356,31 @@ mod tests {
     }
 
     #[test]
+    fn reads_the_album_key_the_itunes_lookup_searches_with() {
+        let directory = TempDir::new("albumkey");
+        let audio = directory.0.join("Keyed.mp3");
+        write_spotdl_style_audio(&audio);
+        assert_eq!(
+            album_of(&audio),
+            Some(("Daft Punk".to_owned(), "Discovery".to_owned()))
+        );
+
+        let untagged = directory.0.join("Untagged.mp3");
+        fs::write(&untagged, b"").unwrap();
+        assert_eq!(album_of(&untagged), None);
+    }
+
+    #[test]
     fn a_track_without_a_sidecar_still_loses_its_rating() {
         let directory = TempDir::new("norating");
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize(&audio, &TrackMetadata::default(), "eng");
+        let report = finalize(&audio, None, "eng");
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.ratings_removed, 1);
         assert_eq!(report.lyrics_embedded, 0);
         assert_eq!(report.copyrights_written, 0);
-        assert_eq!(report.isrcs_written, 0);
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert!(tag.get(RATING_FRAME).is_none());
@@ -380,11 +396,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "[ar: Artist]\njust prose\n").unwrap();
 
-        let report = finalize(
-            &audio,
-            &remote(Some("2013 Label"), Some("GBAYE0601498")),
-            "eng",
-        );
+        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -405,7 +417,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, &TrackMetadata::default(), "eng");
+        let report = finalize(&audio, None, "eng");
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.languages_detected, 1);
 
@@ -429,7 +441,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, &TrackMetadata::default(), "jpn");
+        let report = finalize(&audio, None, "jpn");
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
 

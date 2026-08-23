@@ -8,8 +8,8 @@ use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::music_files_for_track;
+use crate::itunes::Client as ItunesClient;
 use crate::metadata::{self, MetadataReport};
-use crate::spotify::{Client as SpotifyClient, Credentials, TrackMetadata};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -78,13 +78,12 @@ pub fn run(config: Config) -> Result<i32, String> {
     }
 
     let interactive = !config.non_interactive && io::stdin().is_terminal();
-    let mut spotify = if config.no_spotify_metadata {
-        println!("Spotify metadata lookup: disabled with --no-spotify-metadata.");
+    let mut itunes = if config.no_copyright {
+        println!("Copyright lookup: disabled with --no-copyright.");
         None
     } else {
-        let credentials = Credentials::resolve(interactive)?;
-        println!("Authenticating with the Spotify Web API for copyright and ISRC lookups...");
-        Some(SpotifyClient::connect(&credentials)?)
+        println!("Copyright will be looked up per album through the iTunes Search API.");
+        Some(ItunesClient::new()?)
     };
     let mut auth_token = initial_token(&config)?;
     let total = input.entries.len();
@@ -104,7 +103,7 @@ pub fn run(config: Config) -> Result<i32, String> {
             &mut deno_install_attempted,
         )?;
         if matches!(outcome, EntryOutcome::Completed) {
-            outcome = apply_metadata(&config, entry, spotify.as_mut(), &mut metadata_totals);
+            outcome = apply_metadata(&config, entry, itunes.as_mut(), &mut metadata_totals);
         }
         match outcome {
             EntryOutcome::Completed => completed += 1,
@@ -127,12 +126,17 @@ pub fn run(config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s) and {} ISRC(s).",
+        "Metadata: updated {} file(s); removed {} rating frame(s); wrote {} copyright message(s).",
         metadata_totals.files_updated,
         metadata_totals.ratings_removed,
-        metadata_totals.copyrights_written,
-        metadata_totals.isrcs_written
+        metadata_totals.copyrights_written
     );
+    if metadata_totals.copyright_lookups_failed > 0 {
+        println!(
+            "The iTunes copyright lookup failed for {} file(s); everything else in their tags was still written.",
+            metadata_totals.copyright_lookups_failed
+        );
+    }
     println!(
         "Language: detected from the lyrics for {} of {} file(s); the rest use {}.",
         metadata_totals.languages_detected, metadata_totals.files_updated, config.language
@@ -186,36 +190,17 @@ pub fn run(config: Config) -> Result<i32, String> {
 
 /// Rewrite the tag of every file spotDL just wrote for this pair.
 ///
-/// The pair's Spotify track ID both selects those files — the forced output
-/// template puts it in the file name — and drives the copyright lookup. A file
-/// that cannot be finished is reported as a failure so its pair lands in the
-/// retry list, and its `.lrc` sidecar is left on disk.
+/// The pair's Spotify track ID selects those files: the forced output template
+/// puts it in the file name. The copyright lookup then searches iTunes with the
+/// album artist and album spotDL recorded in the tag. A file that cannot be
+/// finished is reported as a failure so its pair lands in the retry list, and
+/// its `.lrc` sidecar is left on disk.
 fn apply_metadata(
     config: &Config,
     entry: &Entry,
-    spotify: Option<&mut SpotifyClient>,
+    mut itunes: Option<&mut ItunesClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
-    let remote = match spotify {
-        Some(client) => match client.track_metadata(&entry.track_id) {
-            Ok(remote) => {
-                if remote.copyright.is_none() {
-                    println!("Spotify lists no copyright for this track.");
-                }
-                if remote.isrc.is_none() {
-                    println!("Spotify lists no ISRC for this track.");
-                }
-                remote
-            }
-            Err(error) => {
-                return EntryOutcome::Failed(format!(
-                    "the audio downloaded but its Spotify metadata could not be fetched: {error}"
-                ));
-            }
-        },
-        None => TrackMetadata::default(),
-    };
-
     let files = match music_files_for_track(&config.output, &entry.track_id) {
         Ok(files) => files,
         Err(error) => {
@@ -234,9 +219,29 @@ fn apply_metadata(
     }
 
     let mut report = MetadataReport::default();
+    let mut lookups_failed = 0;
     for file in &files {
-        report.absorb(metadata::finalize(file, &remote, &config.language));
+        // A failed lookup must not cost the rest of the tag work. iTunes needs
+        // no account and throttles freely, so a miss is left as a warning and
+        // the copyright frame is simply not touched.
+        let copyright = match itunes.as_deref_mut() {
+            Some(client) => match album_copyright(client, file) {
+                Ok(copyright) => copyright,
+                Err(error) => {
+                    eprintln!("Copyright: {error}");
+                    lookups_failed += 1;
+                    None
+                }
+            },
+            None => None,
+        };
+        report.absorb(metadata::finalize(
+            file,
+            copyright.as_deref(),
+            &config.language,
+        ));
     }
+    report.copyright_lookups_failed = lookups_failed;
 
     let reasons = report
         .failures
@@ -261,8 +266,8 @@ fn apply_metadata(
             "taken from --language"
         };
         println!(
-            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s) and {} ISRC(s), language {language}{lyrics}.",
-            report.ratings_removed, report.copyrights_written, report.isrcs_written
+            "Updated the tag: removed {} rating frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
+            report.ratings_removed, report.copyrights_written
         );
     }
 
@@ -276,6 +281,19 @@ fn apply_metadata(
     };
     totals.absorb(report);
     outcome
+}
+
+/// Look up one file's album on iTunes, using the tag spotDL wrote.
+fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<String>, String> {
+    let Some((artist, album)) = metadata::album_of(audio) else {
+        println!("The downloaded file has no album artist and album to search iTunes with.");
+        return Ok(None);
+    };
+    let copyright = client.copyright(&artist, &album)?;
+    if copyright.is_none() {
+        println!("iTunes has no matching album for \"{artist} - {album}\".");
+    }
+    Ok(copyright)
 }
 
 fn initial_token(config: &Config) -> Result<Option<String>, String> {

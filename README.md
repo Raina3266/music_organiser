@@ -32,7 +32,7 @@ The individual workflows have these additional requirements:
 | Workflow | Additional requirements |
 |---|---|
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
-| Copyright and ISRC | A Spotify developer app and its Client ID/Client Secret |
+| Copyright | Nothing; the iTunes Search API needs no account, key, or token |
 | Synced lyrics and language | Nothing extra; both are handled by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
@@ -101,20 +101,12 @@ write those pairs yourself.
    ```
 
 Every pair is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
-tag is then rewritten: the `POPM` rating frame is removed, `TCOP`, `TSRC`, and
-`TLAN` are filled in, and the generated `.lrc` file becomes a `SYLT` frame and
-is deleted.
+tag is then rewritten: the `POPM` rating frame is removed, `TCOP` and `TLAN`
+are filled in, and the generated `.lrc` file becomes a `SYLT` frame and is
+deleted.
 
-The copyright and ISRC lookups need a Spotify app's Client ID and Client
-Secret. Export them, and the run will not stop to ask:
-
-```bash
-export SPOTIFY_CLIENT_ID='your-client-id'
-export SPOTIFY_CLIENT_SECRET='your-client-secret'
-```
-
-Otherwise the command prompts for both before downloading anything. Pass
-`--no-spotify-metadata` to skip the lookup entirely.
+No credentials are needed for any of it. The copyright comes from the iTunes
+Search API, which is open to anyone.
 
 ## Global usage
 
@@ -186,7 +178,7 @@ and stops before starting spotDL.
 | `--token-file <FILE>` | Official mode: read the access token from a file |
 | `--non-interactive` | Never prompt for Deno or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-spotify-metadata` | Skip the Spotify copyright/ISRC lookup instead of asking for credentials |
+| `--no-copyright` | Skip the iTunes copyright lookup |
 | `--language <CODE>` | Fallback ISO-639-2 language for `TLAN`; default `eng` |
 | `--max-attempts <N>` | Network attempts per pair; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
@@ -258,51 +250,57 @@ Two caveats:
 - Existing downloads are not moved. Rerunning the same input file re-downloads
   them into the new layout, because `--overwrite force` is used.
 
-### Rating, copyright, ISRC, and language frames
+### Rating, copyright, and language frames
 
 spotDL writes a `POPM` popularimeter frame from Spotify's popularity score —
 the frame most taggers display as the track's rating — and leaves `TCOP` empty,
 because a single-track fetch does not carry the album's copyright.
 
-After each download this program rewrites four frames:
+After each download this program rewrites three frames:
 
 | Frame | What happens |
 |---|---|
 | `POPM` | Removed outright |
-| `TCOP` | Set to the copyright message fetched from Spotify |
-| `TSRC` | Set to the ISRC fetched from Spotify |
+| `TCOP` | Set to the copyright message looked up on iTunes |
 | `TLAN` | Set to the language detected from the lyrics, or `--language` |
 
-When Spotify lists no value for `TCOP` or `TSRC`, that frame is left alone and
-the run says so rather than storing something invented.
+`TSRC` is deliberately **not** touched. spotDL already fills the ISRC from its
+own metadata, and iTunes publishes no ISRCs, so whatever spotDL wrote is left
+in place.
 
-#### Where the values come from
+#### Copyright
 
-The ISRC rides along on the track request, so it costs nothing extra.
-Copyright exists only on Spotify's album object, so a lookup is a track request
-followed by an album request. Albums are cached, so a whole album's worth of
-pairs costs one album request. When an album lists both a `C` copyright and a
-`P` phonogram entry, the `C` entry wins.
+The copyright comes from the [iTunes Search
+API](https://performance-partners.apple.com/search-api), which needs no
+account, key, or token — nothing has to be registered or exported to use it.
 
-The lookup uses the client-credentials flow and needs a Spotify developer app:
+Lookups are by album rather than by track, because the copyright belongs to the
+album and because the downloads are already grouped that way. The album artist
+and album name in the tag spotDL just wrote are the search terms, and results
+are cached, so an album's worth of tracks costs one request.
 
-| Variable | Purpose |
-|---|---|
-| `SPOTIFY_CLIENT_ID` | Client ID of a Spotify developer app |
-| `SPOTIFY_CLIENT_SECRET` | Client Secret of the same app |
+A copyright is stored only when a result matches **both** the album artist and
+the album name, because a wrong copyright is worse than none. The comparison
+ignores case and punctuation and allows one name to extend the other, so
+`Random Access Memories` still matches a listing called `Random Access Memories
+(Deluxe Edition)`. Anything less similar is treated as a different release and
+the frame is left alone.
 
-If either is missing, the command prompts for it before downloading anything,
-so a long run never stops halfway to ask. The values are used only for that run
-and are never written to disk. With `--non-interactive` there is nothing to
-prompt, so the command stops and names the two variables.
-`--no-spotify-metadata` skips the lookup, and with it `TCOP` and `TSRC`.
+If the lookup fails outright — the API throttling, or no network — that is
+reported as a warning and **the rest of the tag is still written**. The rating
+still goes, the lyrics are still embedded, and only `TCOP` is left untouched.
+`--no-copyright` skips the lookup altogether.
+
+Two things to know about the API: it is throttled per IP, so requests are
+spaced out and a throttled response is retried a few times before giving up;
+and it is queried against the US storefront, whose catalogue is the most
+complete. The `℗` line is the label's and rarely differs between storefronts.
 
 #### Language
 
-Spotify does not expose a language for tracks — only shows and episodes carry
-one — so `TLAN` cannot be fetched the way copyright and ISRC are. The synced
-lyrics are the only evidence available, and the language is detected from their
-text.
+Neither Spotify nor iTunes exposes a language for tracks, so `TLAN` cannot be
+looked up. The synced lyrics are the only evidence available, and the language
+is detected from their text.
 
 - A confident detection sets `TLAN`, and the `SYLT` frame's own language field
   is set to match.
@@ -312,10 +310,9 @@ text.
 - A track with no `.lrc` file has nothing to detect from, so it gets
   `--language` too.
 
-`TLAN` is written even with `--no-spotify-metadata`, because it never came
-from Spotify. The detector reports ISO-639-3, which for every individual
-language it knows is the same as the ISO-639-2/T code ID3v2.3 asks for; the two
-macrolanguage cases are mapped (`cmn` becomes `zho`, `pes` becomes `fas`).
+The detector reports ISO-639-3, which for every individual language it knows is
+the same as the ISO-639-2/T code ID3v2.3 asks for; the two macrolanguage cases
+are mapped (`cmn` becomes `zho`, `pes` becomes `fas`).
 
 ### Synchronised lyrics as an ID3 `SYLT` frame
 
@@ -515,12 +512,13 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 `load_config`, or clear the official-API settings named in the error. Use
 `--official-api` only when that mode is intentional.
 
-### Spotify authentication for copyright/ISRC fails
+### No copyright was written
 
-Confirm `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` belong to the same
-Spotify developer app. These are app credentials and are different from
-`SPOTIFY_AUTH_TOKEN`, which is used only by the downloader's optional
-official mode. Run with `--no-spotify-metadata` to download without them.
+Either iTunes had no album matching both the album artist and the album name in
+the tag, or the lookup failed and said so. Both are reported during the run,
+and neither stops anything else in the tag from being written. Reissues and
+regional editions are the usual cause of a miss; `--no-copyright` turns the
+lookup off if you would rather not see it.
 
 ### A download needs Deno
 
@@ -582,16 +580,12 @@ The same metadata rules can be applied to a single file that already has a
 
 ```rust
 use std::path::Path;
-use music_tag_transfer::{finalize, spotify::TrackMetadata};
+use music_tag_transfer::finalize;
 
 fn main() {
-    let remote = TrackMetadata {
-        copyright: Some("2013 Some Label".to_owned()),
-        isrc: Some("GBAYE0601498".to_owned()),
-    };
     let report = finalize(
         Path::new("/path/to/Artist - Song [id].mp3"),
-        &remote,
+        Some("\u{2117} 2001 Daft Life Limited"),
         "eng",
     );
     println!(
@@ -604,9 +598,10 @@ fn main() {
 }
 ```
 
-`DeleteReport`, `MetadataReport`, `FileError`, and `TagSpec` are also exported.
-The `cli`, `download`, `metadata`, and `spotify` modules expose the
-executable's command configuration and entry points.
+`DeleteReport`, `MetadataReport`, `FileError`, and `TagSpec` are also exported,
+along with `album_of` for reading the album key a lookup searches with. The
+`cli`, `download`, `itunes`, and `metadata` modules expose the executable's
+command configuration and entry points.
 
 ## Development
 
