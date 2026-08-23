@@ -1,5 +1,5 @@
-//! Exact-source spotDL downloads, ID3 metadata rewriting, and recursive
-//! ID3v2.3 tag deletion.
+//! spotDL downloads of Spotify and YouTube Music links, ID3 metadata
+//! rewriting, and recursive ID3v2.3 tag deletion.
 
 pub mod cli;
 mod delete;

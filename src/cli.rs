@@ -16,21 +16,23 @@ USAGE:
     " delete <FOLDER> \"[Tag Name, Other Tag]\" [--dry-run]
 
 COMMANDS:
-    download    Download YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pairs through spotDL
+    download    Download Spotify and/or YouTube Music links through spotDL
     delete      Remove selected ID3 tags from a folder recursively
 
 EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
-    " download pairs.txt --output ~/Documents/Music
+    " download links.txt --output ~/Documents/Music
     ",
     env!("CARGO_PKG_NAME"),
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
 
-The download command reads one YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per
-line and forces MP3 with synced lyrics. It then rewrites each file's ID3v2.3
-tag: the POPM rating frame is removed, the TCOP copyright message is fetched
-from Spotify, and the generated .lrc file becomes a SYLT frame.
+The download command reads one link per line and forces MP3 with synced
+lyrics. A line is a Spotify URL, a YouTube Music URL, or a
+YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL exact-source pair, and one file may mix
+all three. It then rewrites each file's ID3v2.3 tag: the POPM rating frame is
+removed, the TCOP copyright message is looked up on iTunes, and the generated
+.lrc file becomes a SYLT frame.
 
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.

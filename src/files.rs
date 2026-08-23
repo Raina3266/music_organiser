@@ -1,7 +1,9 @@
 use std::{
+    collections::HashMap,
     error::Error,
     fs, io,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use id3::{Tag, Version};
@@ -26,10 +28,68 @@ pub(crate) fn sibling_lyrics_file(audio: &Path) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
+/// What the music files under a directory looked like at one moment.
+///
+/// The download command takes a snapshot before every download so it can tell
+/// afterwards which files spotDL just wrote. That works for any input line,
+/// including the ones that name no single Spotify track: a bare YouTube link,
+/// or an album or playlist that expands into many songs.
+#[derive(Debug, Default)]
+pub(crate) struct MusicSnapshot {
+    stamps: HashMap<PathBuf, Stamp>,
+}
+
+/// Enough of a file's metadata to notice a rewrite.
+///
+/// spotDL downloads with `--overwrite force`, so a song already on disk is
+/// written again under the same path; the modification time and length change
+/// even though the path does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: Option<SystemTime>,
+    length: u64,
+}
+
+pub(crate) fn snapshot_music_files(root: &Path) -> io::Result<MusicSnapshot> {
+    let mut stamps = HashMap::new();
+    for path in music_files_recursively(root)? {
+        if let Ok(stamp) = stamp_of(&path) {
+            stamps.insert(path, stamp);
+        }
+    }
+    Ok(MusicSnapshot { stamps })
+}
+
+impl MusicSnapshot {
+    /// The music files that appeared or were rewritten since the snapshot.
+    pub(crate) fn files_written_since(&self, root: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut written = Vec::new();
+        for path in music_files_recursively(root)? {
+            let Ok(stamp) = stamp_of(&path) else {
+                continue;
+            };
+            if self.stamps.get(&path) != Some(&stamp) {
+                written.push(path);
+            }
+        }
+        Ok(written)
+    }
+}
+
+fn stamp_of(path: &Path) -> io::Result<Stamp> {
+    let metadata = fs::metadata(path)?;
+    Ok(Stamp {
+        modified: metadata.modified().ok(),
+        length: metadata.len(),
+    })
+}
+
 /// The audio files spotDL wrote for one Spotify track.
 ///
 /// The download command forces spotDL's `[{track-id}]` output template, so the
-/// track ID in the file name is what ties a file back to its input pair.
+/// track ID in the file name ties a file back to an input line that names a
+/// single track. It is the fallback for when the snapshot comparison comes up
+/// empty, and it does not apply to lines without a track ID.
 pub(crate) fn music_files_for_track(root: &Path, track_id: &str) -> io::Result<Vec<PathBuf>> {
     let suffix = format!("[{track_id}]");
     Ok(music_files_recursively(root)?
@@ -115,6 +175,34 @@ pub(crate) fn write_tag_safely(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_snapshot_reports_new_and_rewritten_music_files() {
+        let root = std::env::temp_dir().join(format!("music-snapshot-{}", std::process::id()));
+        let album = root.join("Artist || Album");
+        fs::create_dir_all(&album).unwrap();
+        let existing = album.join("Artist - Old [aaa].mp3");
+        fs::write(&existing, b"old").unwrap();
+
+        let snapshot = snapshot_music_files(&root).unwrap();
+        assert!(snapshot.files_written_since(&root).unwrap().is_empty());
+
+        let added = album.join("Artist - New [bbb].mp3");
+        fs::write(&added, b"new").unwrap();
+        fs::write(album.join("cover.jpg"), b"art").unwrap();
+        assert_eq!(
+            snapshot.files_written_since(&root).unwrap(),
+            vec![added.clone()]
+        );
+
+        fs::write(&existing, b"rewritten").unwrap();
+        assert_eq!(
+            snapshot.files_written_since(&root).unwrap(),
+            vec![added, existing]
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn recognizes_supported_extensions_case_insensitively() {

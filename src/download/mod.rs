@@ -7,27 +7,30 @@ mod token;
 use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
-use crate::files::music_files_for_track;
+use crate::files::{self, MusicSnapshot};
 use crate::itunes::Client as ItunesClient;
 use crate::metadata::{self, MetadataReport};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
-/// Download every unique `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair in
-/// `config.input` through spotDL, then rewrite each file's ID3v2.3 tag: drop
-/// the POPM rating, store the Spotify copyright, and move the generated `.lrc`
-/// file into a SYLT frame.
+/// Download every unique line in `config.input` through spotDL, then rewrite
+/// each file's ID3v2.3 tag: drop the POPM rating, store the Spotify copyright,
+/// and move the generated `.lrc` file into a SYLT frame.
 ///
-/// A return value of `0` means every pair downloaded and had its metadata
+/// A line is a Spotify URL, a YouTube Music URL, or a
+/// `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pair, and the three may
+/// be mixed freely in one file.
+///
+/// A return value of `0` means every line downloaded and had its metadata
 /// applied; `1` means a retry list was written for failed or unattempted
-/// pairs.
+/// lines.
 pub fn run(config: Config) -> Result<i32, String> {
     let input = input::load(&config.input)?;
     fs::create_dir_all(&config.output)
@@ -60,12 +63,13 @@ pub fn run(config: Config) -> Result<i32, String> {
         ));
     }
     println!(
-        "Loaded {} unique YouTube Music/Spotify pair(s) from {}.",
+        "Loaded {} unique download(s) from {}: {}.",
         input.entries.len(),
-        config.input.display()
+        config.input.display(),
+        input.summary()
     );
     if input.duplicate_count > 0 {
-        println!("Ignored {} duplicate pair(s).", input.duplicate_count);
+        println!("Ignored {} duplicate line(s).", input.duplicate_count);
     }
     println!("Downloads will be stored in {}.", config.output.display());
     if config.official_api {
@@ -95,16 +99,35 @@ pub fn run(config: Config) -> Result<i32, String> {
 
     for (index, entry) in input.entries.iter().enumerate() {
         println!("\n[{}/{}] Downloading {}", index + 1, total, entry.query);
-        let mut outcome = download_entry(
-            &config,
-            entry,
-            &mut auth_token,
-            interactive,
-            &mut deno_install_attempted,
-        )?;
-        if matches!(outcome, EntryOutcome::Completed) {
-            outcome = apply_metadata(&config, entry, itunes.as_mut(), &mut metadata_totals);
-        }
+        // The snapshot is what tells this run apart from everything already in
+        // the output directory, so a line that names no single Spotify track
+        // still finds the files it just produced.
+        let outcome = match files::snapshot_music_files(&config.output) {
+            Err(error) => EntryOutcome::Abort(format!(
+                "cannot scan {} before downloading: {error}",
+                config.output.display()
+            )),
+            Ok(before) => {
+                let outcome = download_entry(
+                    &config,
+                    entry,
+                    &mut auth_token,
+                    interactive,
+                    &mut deno_install_attempted,
+                )?;
+                if matches!(outcome, EntryOutcome::Completed) {
+                    apply_metadata(
+                        &config,
+                        entry,
+                        &before,
+                        itunes.as_mut(),
+                        &mut metadata_totals,
+                    )
+                } else {
+                    outcome
+                }
+            }
+        };
         match outcome {
             EntryOutcome::Completed => completed += 1,
             EntryOutcome::Failed(reason) => {
@@ -149,7 +172,7 @@ pub fn run(config: Config) -> Result<i32, String> {
     );
     if !metadata_totals.failures.is_empty() {
         println!(
-            "{} file(s) could not be finished; any .lrc file was kept and the pair is in the retry list.",
+            "{} file(s) could not be finished; any .lrc file was kept and the line is in the retry list.",
             metadata_totals.failures.len()
         );
     }
@@ -158,7 +181,7 @@ pub fn run(config: Config) -> Result<i32, String> {
         println!("Not attempted: {remaining}");
         println!("Reason for stopping: {}", stop.reason);
         println!(
-            "Rerun the same command after fixing the reported problem; spotDL uses --overwrite force, so every retried pair is downloaded again."
+            "Rerun the same command after fixing the reported problem; spotDL uses --overwrite force, so every retried line is downloaded again."
         );
     }
 
@@ -174,7 +197,7 @@ pub fn run(config: Config) -> Result<i32, String> {
                 .map(|entry| entry.query.as_str()),
         ),
     )?;
-    println!("Retry pair list: {}", retry_path.display());
+    println!("Retry list: {}", retry_path.display());
 
     if !failures.is_empty() {
         let report = write_failure_report(&config.output, &failures, stop.as_ref())?;
@@ -188,20 +211,19 @@ pub fn run(config: Config) -> Result<i32, String> {
     })
 }
 
-/// Rewrite the tag of every file spotDL just wrote for this pair.
+/// Rewrite the tag of every file spotDL just wrote for this entry.
 ///
-/// The pair's Spotify track ID selects those files: the forced output template
-/// puts it in the file name. The copyright lookup then searches iTunes with the
-/// album artist and album spotDL recorded in the tag. A file that cannot be
-/// finished is reported as a failure so its pair lands in the retry list, and
-/// its `.lrc` sidecar is left on disk.
+/// The copyright lookup searches iTunes with the album artist and album spotDL
+/// recorded in the tag. A file that cannot be finished is reported as a failure
+/// so its line lands in the retry list, and its `.lrc` sidecar is left on disk.
 fn apply_metadata(
     config: &Config,
     entry: &Entry,
+    before: &MusicSnapshot,
     mut itunes: Option<&mut ItunesClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
-    let files = match music_files_for_track(&config.output, &entry.track_id) {
+    let files = match downloaded_files(config, entry, before) {
         Ok(files) => files,
         Err(error) => {
             return EntryOutcome::Abort(format!(
@@ -212,8 +234,7 @@ fn apply_metadata(
     };
     if files.is_empty() {
         return EntryOutcome::Failed(format!(
-            "spotDL reported success but no audio file named [{}] was found in {}",
-            entry.track_id,
+            "spotDL reported success but wrote no audio file into {}",
             config.output.display()
         ));
     }
@@ -281,6 +302,28 @@ fn apply_metadata(
     };
     totals.absorb(report);
     outcome
+}
+
+/// The audio spotDL just wrote for one entry.
+///
+/// Comparing the output directory against the snapshot taken before the
+/// download covers every line form, including an album or playlist that
+/// expanded into many songs. spotDL's `[{track-id}]` file name is only a
+/// fallback for a line that names a single track, in case the comparison
+/// missed a rewrite of a file that was already there.
+fn downloaded_files(
+    config: &Config,
+    entry: &Entry,
+    before: &MusicSnapshot,
+) -> io::Result<Vec<PathBuf>> {
+    let written = before.files_written_since(&config.output)?;
+    if !written.is_empty() {
+        return Ok(written);
+    }
+    match entry.source.track_id() {
+        Some(track_id) => files::music_files_for_track(&config.output, track_id),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Look up one file's album on iTunes, using the tag spotDL wrote.

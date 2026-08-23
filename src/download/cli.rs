@@ -212,7 +212,7 @@ fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
 
 pub fn help_text() -> String {
     format!(
-        "{package} download - download one YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair per line
+        "{package} download - download one Spotify or YouTube Music link per line
 
 USAGE:
     {package} download [OPTIONS] <INPUT_FILE>
@@ -233,15 +233,28 @@ OPTIONS:
     -V, --version                     Print version
 
 INPUT FORMAT:
-    Every non-comment line must be an exact-source pair:
+    Every non-comment line is one of three forms, and a single file may mix
+    them freely:
 
+        https://open.spotify.com/track/TRACK_ID
+        https://music.youtube.com/watch?v=VIDEO_ID
         https://music.youtube.com/watch?v=VIDEO_ID|https://open.spotify.com/track/TRACK_ID
 
-    The left URL pins the audio spotDL downloads; the right URL supplies the
-    Spotify track metadata. Each pair runs as:
+    A Spotify link pins the metadata and lets spotDL search YouTube for the
+    audio; track, album, and playlist links are accepted, and an album or a
+    playlist downloads every song on it. A YouTube link pins the audio and
+    lets spotDL search Spotify for the metadata; /watch and /playlist links
+    are accepted, as are youtu.be and www.youtube.com. The pair is
+    spotDL's exact-source syntax: the left URL pins the audio, the right URL
+    supplies the metadata, and neither side is searched. spotify: URIs work
+    wherever a Spotify URL does.
 
-        spotdl download \"PAIR\" --overwrite force --format mp3 \\
+    Each line runs as:
+
+        spotdl download \"LINE\" --overwrite force --format mp3 \\
               --lyrics synced --generate-lrc
+
+    Duplicate lines are ignored after the tracking parameters are stripped.
 
 FILE LAYOUT:
     Songs are grouped into one folder per album, so everything from the same
@@ -250,6 +263,9 @@ FILE LAYOUT:
         <OUTPUT_DIR>/{{Album Artist}} || {{Album}}/{{artists}} - {{title}}.mp3
 
     output.txt and the failure report stay in the output directory itself.
+    Whatever a line downloads is found by comparing the output directory
+    against what was there before it ran, so an album or playlist line has
+    every one of its songs tagged.
 
 METADATA:
     After each download the ID3v2.3 tag is rewritten:
@@ -274,7 +290,7 @@ SYNCED LYRICS:
     parsed into an ID3v2.3 SYLT frame with millisecond timestamps. The USLT
     frame is removed, the frame is read back from the file to verify it, and
     only then is the .lrc file deleted. If any of that fails, the .lrc file is
-    kept and the pair is added to the retry list.
+    kept and the line is added to the retry list.
 
 SPOTIFY MODE:
     The default uses spotDL's token-free client. --official-api is an explicit

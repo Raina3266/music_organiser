@@ -2,7 +2,7 @@
 name = "music-tag-transfer"
 version = "0.1.0"
 edition = "2024"
-description = "Download exact-source YouTube Music/Spotify pairs, rewrite their ID3 metadata, and delete ID3 tags recursively"
+description = "Download Spotify and YouTube Music links through spotDL, rewrite their ID3 metadata, and delete ID3 tags recursively"
 
 [dependencies]
 id3 = "1.16.4"

@@ -4,24 +4,111 @@ use std::path::Path;
 
 pub(super) const PAIR_SEPARATOR: char = '|';
 
-/// One `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair from the input file.
+/// What one input line asks spotDL to download.
 ///
-/// The pair is spotDL's exact-source syntax: the YouTube Music URL pins the
-/// audio that is downloaded and the Spotify track URL supplies the metadata,
-/// so neither side is left to a search.
+/// A line is one of three forms, and each one leaves a different part of the
+/// job to spotDL's own search:
+///
+/// * `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` is spotDL's exact-source syntax:
+///   the YouTube Music URL pins the audio and the Spotify track URL supplies
+///   the metadata, so neither side is searched.
+/// * a Spotify URL on its own pins the metadata; spotDL searches YouTube for
+///   the audio.
+/// * a YouTube Music URL on its own pins the audio; spotDL searches Spotify
+///   for the metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Source {
+    Pair { track_id: String },
+    Spotify { kind: SpotifyKind, id: String },
+    YouTube,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SpotifyKind {
+    Track,
+    Album,
+    Playlist,
+}
+
+impl SpotifyKind {
+    fn path(self) -> &'static str {
+        match self {
+            SpotifyKind::Track => "track",
+            SpotifyKind::Album => "album",
+            SpotifyKind::Playlist => "playlist",
+        }
+    }
+}
+
+impl Source {
+    /// The Spotify track ID when the line names exactly one track.
+    ///
+    /// It ties a downloaded file back to this entry through spotDL's
+    /// `[{track-id}]` file name and drives the copyright lookup. A bare
+    /// YouTube link, an album, and a playlist have no single track ID, so they
+    /// return `None` and are matched by what the download wrote instead.
+    pub(super) fn track_id(&self) -> Option<&str> {
+        match self {
+            Source::Pair { track_id } => Some(track_id),
+            Source::Spotify {
+                kind: SpotifyKind::Track,
+                id,
+            } => Some(id),
+            _ => None,
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        match self {
+            Source::Pair { .. } => "exact-source pair(s)",
+            Source::Spotify {
+                kind: SpotifyKind::Track,
+                ..
+            } => "Spotify track(s)",
+            Source::Spotify {
+                kind: SpotifyKind::Album,
+                ..
+            } => "Spotify album(s)",
+            Source::Spotify {
+                kind: SpotifyKind::Playlist,
+                ..
+            } => "Spotify playlist(s)",
+            Source::YouTube => "YouTube link(s)",
+        }
+    }
+}
+
+/// One download the input file asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Entry {
     pub(super) line: usize,
     pub(super) query: String,
-    /// The Spotify track ID from the right-hand side of the pair. It ties the
-    /// downloaded file back to this entry and drives the copyright lookup.
-    pub(super) track_id: String,
+    pub(super) source: Source,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct InputList {
     pub(super) entries: Vec<Entry>,
     pub(super) duplicate_count: usize,
+}
+
+impl InputList {
+    /// A one-line breakdown of the accepted entries by line form.
+    pub(super) fn summary(&self) -> String {
+        let mut counts: Vec<(&'static str, usize)> = Vec::new();
+        for entry in &self.entries {
+            let label = entry.source.describe();
+            match counts.iter_mut().find(|(name, _)| *name == label) {
+                Some((_, count)) => *count += 1,
+                None => counts.push((label, 1)),
+            }
+        }
+        counts
+            .into_iter()
+            .map(|(label, count)| format!("{count} {label}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 pub(super) fn load(path: &Path) -> Result<InputList, String> {
@@ -43,13 +130,13 @@ fn parse(contents: &str) -> Result<InputList, String> {
             continue;
         }
 
-        match normalize_pair(line) {
-            Ok(pair) => {
-                if seen.insert(pair.query.clone()) {
+        match normalize_line(line) {
+            Ok(normalized) => {
+                if seen.insert(normalized.query.clone()) {
                     entries.push(Entry {
                         line: line_number,
-                        query: pair.query,
-                        track_id: pair.track_id,
+                        query: normalized.query,
+                        source: normalized.source,
                     });
                 } else {
                     duplicate_count += 1;
@@ -73,11 +160,11 @@ fn parse(contents: &str) -> Result<InputList, String> {
             format!("\n... and {remainder} more invalid line(s)")
         };
         return Err(format!(
-            "invalid input:\n{shown}{suffix}\n\nEach line must be YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL."
+            "invalid input:\n{shown}{suffix}\n\nEach line must be a SPOTIFY_URL, a YOUTUBE_MUSIC_URL, or a YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair."
         ));
     }
     if entries.is_empty() {
-        return Err("the input file contains no YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pairs".into());
+        return Err("the input file contains no Spotify or YouTube Music links".into());
     }
 
     Ok(InputList {
@@ -87,19 +174,23 @@ fn parse(contents: &str) -> Result<InputList, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Pair {
+struct Normalized {
     query: String,
-    track_id: String,
+    source: Source,
+}
+
+/// Validate one input line, whichever of the three forms it uses.
+fn normalize_line(raw: &str) -> Result<Normalized, String> {
+    if raw.contains(PAIR_SEPARATOR) {
+        normalize_pair(raw)
+    } else {
+        normalize_single(raw)
+    }
 }
 
 /// Validate one `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` line.
-fn normalize_pair(raw: &str) -> Result<Pair, String> {
+fn normalize_pair(raw: &str) -> Result<Normalized, String> {
     let separators = raw.matches(PAIR_SEPARATOR).count();
-    if separators == 0 {
-        return Err(
-            "missing the '|' separator; expected YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL".into(),
-        );
-    }
     if separators > 1 {
         return Err(format!(
             "found {separators} '|' separators; expected exactly one"
@@ -109,18 +200,75 @@ fn normalize_pair(raw: &str) -> Result<Pair, String> {
     let (youtube, spotify) = raw
         .split_once(PAIR_SEPARATOR)
         .expect("a single separator was just counted");
-    let youtube = normalize_youtube_url(youtube.trim())?;
-    let track_id = spotify_track_id(spotify.trim())?;
-    Ok(Pair {
+    let youtube = youtube.trim();
+    if youtube.is_empty() {
+        return Err("the YouTube Music URL is missing before '|'".into());
+    }
+    let spotify = spotify.trim();
+    if spotify.is_empty() {
+        return Err("the Spotify track URL is missing after '|'".into());
+    }
+
+    let youtube = normalize_youtube_url(youtube)?;
+    let track_id = spotify_track_id(spotify)?;
+    Ok(Normalized {
         query: format!("{youtube}{PAIR_SEPARATOR}https://open.spotify.com/track/{track_id}"),
-        track_id,
+        source: Source::Pair { track_id },
     })
 }
 
-fn normalize_youtube_url(raw: &str) -> Result<String, String> {
-    if raw.is_empty() {
-        return Err("the YouTube Music URL is missing before '|'".into());
+/// Validate a line that names a single Spotify or YouTube Music link.
+fn normalize_single(raw: &str) -> Result<Normalized, String> {
+    match service_of(raw)? {
+        Service::Spotify => {
+            let link = spotify_link(raw)?;
+            Ok(Normalized {
+                query: link.url(),
+                source: Source::Spotify {
+                    kind: link.kind,
+                    id: link.id,
+                },
+            })
+        }
+        Service::YouTube => Ok(Normalized {
+            query: normalize_youtube_url(raw)?,
+            source: Source::YouTube,
+        }),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Service {
+    Spotify,
+    YouTube,
+}
+
+/// Decide which service a lone URL belongs to before validating it in detail.
+fn service_of(raw: &str) -> Result<Service, String> {
+    if raw
+        .get(..8)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("spotify:"))
+    {
+        return Ok(Service::Spotify);
+    }
+
+    let (host, _) = split_url(
+        raw,
+        "expected a https://open.spotify.com/... or https://music.youtube.com/... URL",
+    )?;
+    let host = host.to_ascii_lowercase();
+    if host == "spotify.com" || host.ends_with(".spotify.com") || host == "spotify.link" {
+        return Ok(Service::Spotify);
+    }
+    if host == "youtu.be" || host == "youtube.com" || host.ends_with(".youtube.com") {
+        return Ok(Service::YouTube);
+    }
+    Err(format!(
+        "unsupported host: {host}; a line must name a Spotify or YouTube Music URL"
+    ))
+}
+
+fn normalize_youtube_url(raw: &str) -> Result<String, String> {
     let (host, remainder) = split_url(raw, "expected a https://music.youtube.com/... URL")?;
     let host = host.to_ascii_lowercase();
     let path = before_query_or_fragment(remainder).trim_matches('/');
@@ -160,29 +308,40 @@ fn normalize_youtube_url(raw: &str) -> Result<String, String> {
     }
 }
 
-/// Extract the track ID from the Spotify half of a pair.
-fn spotify_track_id(raw: &str) -> Result<String, String> {
-    if raw.is_empty() {
-        return Err("the Spotify track URL is missing after '|'".into());
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpotifyLink {
+    kind: SpotifyKind,
+    id: String,
+}
 
+impl SpotifyLink {
+    fn url(&self) -> String {
+        format!("https://open.spotify.com/{}/{}", self.kind.path(), self.id)
+    }
+}
+
+/// Extract the content type and ID from a Spotify URL or `spotify:` URI.
+fn spotify_link(raw: &str) -> Result<SpotifyLink, String> {
     if raw
         .get(..8)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("spotify:"))
     {
         let parts: Vec<&str> = raw.split(':').collect();
-        if parts.len() != 3 || !parts[1].eq_ignore_ascii_case("track") {
+        if parts.len() != 3 {
             return Err("Spotify URI must look like spotify:track:ID".into());
         }
-        return Ok(spotify_id(parts[2])?.to_owned());
+        return Ok(SpotifyLink {
+            kind: spotify_kind(parts[1])?,
+            id: spotify_id(parts[2])?.to_owned(),
+        });
     }
 
-    let (host, remainder) = split_url(raw, "expected a https://open.spotify.com/track/... URL")?;
+    let (host, remainder) = split_url(raw, "expected a https://open.spotify.com/... URL")?;
     if !host.eq_ignore_ascii_case("open.spotify.com")
         && !host.eq_ignore_ascii_case("www.open.spotify.com")
     {
         return Err(format!(
-            "unsupported Spotify host: {host}; the pair needs an open.spotify.com track URL"
+            "unsupported Spotify host: {host}; an open.spotify.com link is needed because shortened links are not resolved"
         ));
     }
 
@@ -198,13 +357,33 @@ fn spotify_track_id(raw: &str) -> Result<String, String> {
     if parts.len() < 2 {
         return Err("Spotify URL must contain a content type and ID".into());
     }
-    if !parts[0].eq_ignore_ascii_case("track") {
+    Ok(SpotifyLink {
+        kind: spotify_kind(parts[0])?,
+        id: spotify_id(parts[1])?.to_owned(),
+    })
+}
+
+fn spotify_kind(value: &str) -> Result<SpotifyKind, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "track" => Ok(SpotifyKind::Track),
+        "album" => Ok(SpotifyKind::Album),
+        "playlist" => Ok(SpotifyKind::Playlist),
+        other => Err(format!(
+            "unsupported Spotify link type {other:?}; use a track, album, or playlist URL"
+        )),
+    }
+}
+
+/// Extract the track ID from the Spotify half of a pair.
+fn spotify_track_id(raw: &str) -> Result<String, String> {
+    let link = spotify_link(raw)?;
+    if link.kind != SpotifyKind::Track {
         return Err(format!(
             "the right-hand side must be a Spotify track URL, not a {} URL",
-            parts[0].to_ascii_lowercase()
+            link.kind.path()
         ));
     }
-    Ok(spotify_id(parts[1])?.to_owned())
+    Ok(link.id)
 }
 
 fn split_url<'a>(value: &'a str, expectation: &str) -> Result<(&'a str, &'a str), String> {
@@ -230,7 +409,7 @@ fn spotify_id(id: &str) -> Result<&str, String> {
             .chars()
             .all(|character| character.is_ascii_alphanumeric())
     {
-        return Err("Spotify track ID is malformed".into());
+        return Err("Spotify ID is malformed".into());
     }
     Ok(id)
 }
@@ -269,32 +448,34 @@ fn before_query_or_fragment(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_pair, parse};
+    use super::{Source, SpotifyKind, normalize_line, parse};
 
+    const TRACK: &str = "https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW";
+    const VIDEO: &str = "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
     const PAIR: &str = "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW";
 
-    fn query_of_pair(raw: &str) -> String {
-        normalize_pair(raw).unwrap().query
+    fn query_of_line(raw: &str) -> String {
+        normalize_line(raw).unwrap().query
     }
 
     #[test]
     fn keeps_the_exact_source_pair_and_strips_tracking_parameters() {
-        let pair = normalize_pair(
+        let pair = normalize_line(
             "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDAMVM&si=x|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW?utm_source=openai",
         )
         .unwrap();
         assert_eq!(pair.query, PAIR);
-        assert_eq!(pair.track_id, "02Q0SXOsk74oV4hesiL6JW");
+        assert_eq!(pair.source.track_id(), Some("02Q0SXOsk74oV4hesiL6JW"));
     }
 
     #[test]
     fn accepts_the_other_youtube_hosts_and_spotify_uris() {
         assert_eq!(
-            query_of_pair("https://youtu.be/dQw4w9WgXcQ?t=30|spotify:track:02Q0SXOsk74oV4hesiL6JW"),
+            query_of_line("https://youtu.be/dQw4w9WgXcQ?t=30|spotify:track:02Q0SXOsk74oV4hesiL6JW"),
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
         );
         assert_eq!(
-            query_of_pair(
+            query_of_line(
                 "http://m.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/intl-fr/track/02Q0SXOsk74oV4hesiL6JW"
             ),
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
@@ -302,25 +483,70 @@ mod tests {
     }
 
     #[test]
-    fn requires_exactly_one_separator() {
-        assert!(normalize_pair("https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW").is_err());
-        assert!(normalize_pair(&format!("{PAIR}|extra")).is_err());
+    fn accepts_a_spotify_link_on_its_own() {
+        let track = normalize_line(&format!("{TRACK}?si=abc")).unwrap();
+        assert_eq!(track.query, TRACK);
+        assert_eq!(
+            track.source,
+            Source::Spotify {
+                kind: SpotifyKind::Track,
+                id: "02Q0SXOsk74oV4hesiL6JW".into()
+            }
+        );
+        assert_eq!(track.source.track_id(), Some("02Q0SXOsk74oV4hesiL6JW"));
+
+        let album =
+            normalize_line("https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy").unwrap();
+        assert_eq!(
+            album.query,
+            "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
+        );
+        assert_eq!(album.source.track_id(), None);
+
+        assert_eq!(
+            query_of_line("spotify:playlist:37i9dQZF1DXcBWIGoYBM5M"),
+            "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M"
+        );
+    }
+
+    #[test]
+    fn accepts_a_youtube_link_on_its_own() {
+        let video =
+            normalize_line("https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RD").unwrap();
+        assert_eq!(video.query, VIDEO);
+        assert_eq!(video.source, Source::YouTube);
+        assert_eq!(video.source.track_id(), None);
+
+        assert_eq!(
+            query_of_line("https://youtu.be/dQw4w9WgXcQ?t=30"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+    }
+
+    #[test]
+    fn rejects_more_than_one_separator_and_foreign_links() {
+        assert!(normalize_line(&format!("{PAIR}|extra")).is_err());
+        assert!(normalize_line("https://example.com/track/1").is_err());
+        assert!(normalize_line("https://spotify.link/AbCdEf").is_err());
+        assert!(normalize_line("not a url").is_err());
+        assert!(normalize_line("https://open.spotify.com/artist/0TnOYISbd1XYRBk9myaseg").is_err());
+        assert!(normalize_line("https://music.youtube.com/channel/UC123").is_err());
     }
 
     #[test]
     fn rejects_a_non_track_or_foreign_right_hand_side() {
         assert!(
-            normalize_pair(
+            normalize_line(
                 "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy"
             )
             .is_err()
         );
         assert!(
-            normalize_pair("https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://example.com/x")
+            normalize_line("https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://example.com/x")
                 .is_err()
         );
         assert!(
-            normalize_pair(
+            normalize_line(
                 "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://spotify.link/AbCdEf"
             )
             .is_err()
@@ -329,15 +555,16 @@ mod tests {
 
     #[test]
     fn rejects_a_missing_or_foreign_left_hand_side() {
-        assert!(normalize_pair("|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW").is_err());
+        assert!(normalize_line("|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW").is_err());
+        assert!(normalize_line("https://music.youtube.com/watch?v=dQw4w9WgXcQ|").is_err());
         assert!(
-            normalize_pair(
+            normalize_line(
                 "https://vimeo.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
             )
             .is_err()
         );
         assert!(
-            normalize_pair(
+            normalize_line(
                 "https://music.youtube.com/channel/UC123|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
             )
             .is_err()
@@ -352,6 +579,49 @@ mod tests {
         assert_eq!(parsed.duplicate_count, 1);
         assert_eq!(parsed.entries[0].line, 3);
         assert_eq!(parsed.entries[0].query, PAIR);
-        assert_eq!(parsed.entries[0].track_id, "02Q0SXOsk74oV4hesiL6JW");
+        assert_eq!(
+            parsed.entries[0].source.track_id(),
+            Some("02Q0SXOsk74oV4hesiL6JW")
+        );
+    }
+
+    #[test]
+    fn reads_a_file_that_mixes_all_three_forms() {
+        let input = format!("{TRACK}\n{PAIR}\n{VIDEO}\nspotify:album:4aawyAB9vmqN3uQ7FjRGTy\n");
+        let parsed = parse(&input).unwrap();
+
+        let queries: Vec<&str> = parsed
+            .entries
+            .iter()
+            .map(|entry| entry.query.as_str())
+            .collect();
+        assert_eq!(
+            queries,
+            vec![
+                TRACK,
+                PAIR,
+                VIDEO,
+                "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy",
+            ]
+        );
+        assert_eq!(
+            parsed.summary(),
+            "1 Spotify track(s), 1 exact-source pair(s), 1 YouTube link(s), 1 Spotify album(s)"
+        );
+    }
+
+    #[test]
+    fn a_pair_and_its_bare_spotify_track_are_different_downloads() {
+        let parsed = parse(&format!("{PAIR}\n{TRACK}\n")).unwrap();
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.duplicate_count, 0);
+    }
+
+    #[test]
+    fn reports_every_invalid_line_at_once() {
+        let error = parse("https://example.com/a\nhttps://example.com/b\n").unwrap_err();
+        assert!(error.contains("line 1"));
+        assert!(error.contains("line 2"));
+        assert!(error.contains("YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL"));
     }
 }
