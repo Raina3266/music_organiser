@@ -480,6 +480,7 @@ same scan and reports the expected counts without writing files.
 | `Language` | `TLAN` |
 | `Length` | `TLEN` |
 | `Lyrics` | `USLT` |
+| `Synced Lyrics` | `SYLT` |
 | `Lyricist` | `TEXT` |
 | `Media Type` | `TMED` |
 | `Original Album` | `TOAL` |
