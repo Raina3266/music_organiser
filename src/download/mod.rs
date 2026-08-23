@@ -174,7 +174,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     }
     println!(
         "Language: detected from the lyrics for {} of {} file(s); the rest use {}.",
-        metadata_totals.languages_detected, metadata_totals.files_updated, config.language
+        metadata_totals.languages_detected, metadata_totals.files_updated, config.language.name
     );
     println!(
         "Lyrics: pasted {} .lrc file(s) into USLT ({} line(s)); removed {} SYLT frame(s).",
@@ -715,7 +715,7 @@ mod tests {
             non_interactive: false,
             auto_download_deno: false,
             no_copyright: false,
-            language: "eng".into(),
+            language: crate::lyrics::parse_language("English").unwrap(),
             max_attempts: 3,
             max_rate_limit_wait: 300,
         }

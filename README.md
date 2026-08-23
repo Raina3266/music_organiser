@@ -216,7 +216,7 @@ stops before starting spotDL.
 | `--non-interactive` | Never prompt for a token, Deno, or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
 | `--no-copyright` | Skip the iTunes copyright lookup |
-| `--language <CODE>` | Fallback ISO-639-2 language for `TLAN`; default `eng` |
+| `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 | `-h, --help` | Print download help |
@@ -303,7 +303,7 @@ After each download this program rewrites four frames:
 | `POPM` | Removed outright |
 | `TSSE` | Removed outright |
 | `TCOP` | Set to the copyright message looked up on iTunes |
-| `TLAN` | Set to the language detected from the lyrics, or `--language` |
+| `TLAN` | Set to the name of the language detected from the lyrics, or `--language` |
 
 Removal happens after spotDL is finished with the file, so it catches whatever
 FFmpeg wrote during the transcode. Files downloaded before this existed can be
@@ -349,19 +349,31 @@ complete. The `℗` line is the label's and rarely differs between storefronts.
 
 Neither Spotify nor iTunes exposes a language for tracks, so `TLAN` cannot be
 looked up. The synced lyrics are the only evidence available, and the language
-is detected from their text.
+is detected from their text, with the timestamps and any `[ar:...]` metadata
+stripped first so they cannot mislead the detector.
+
+`TLAN` is written as a readable **name** — `English`, `Chinese`, `Korean`,
+`Spanish` — because that is what a tagger displays. ID3v2.3 specifies an
+ISO-639-2 code in this frame, so a strict reader will see a value it does not
+recognise; the three-byte language field inside the `USLT` frame, whose width
+the frame format fixes, still carries the code.
 
 - A confident detection sets `TLAN`, and the lyrics frame's own language field
-  is set to match.
+  is set to the matching code.
 - Too little text, or an unreliable guess, falls back to `--language`
-  (default `eng`) rather than recording something invented. Two or more
+  (default `English`) rather than recording something invented. Two or more
   non-blank lyric lines are required before a guess is even attempted.
 - A track with no `.lrc` file has nothing to detect from, so it gets
   `--language` too.
 
+`--language` takes either form, so `--language Korean`, `--language korean`,
+and `--language kor` are the same request. An unrecognised value is refused
+before anything is downloaded.
+
 The detector reports ISO-639-3, which for every individual language it knows is
 the same as the ISO-639-2/T code ID3v2.3 asks for; the two macrolanguage cases
-are mapped (`cmn` becomes `zho`, `pes` becomes `fas`).
+are mapped to their collective code and name (`cmn` becomes `zho` and
+`Chinese`, `pes` becomes `fas` and `Persian`).
 
 ### Synced lyrics in the ordinary `USLT` frame
 

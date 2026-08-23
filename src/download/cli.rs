@@ -1,8 +1,10 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-/// ISO-639-2 code used when the lyrics cannot settle the language.
-const DEFAULT_LANGUAGE: &str = "eng";
+use crate::lyrics::{Language, parse_language};
+
+/// Language recorded when the lyrics cannot settle one.
+const DEFAULT_LANGUAGE: &str = "English";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -16,8 +18,8 @@ pub struct Config {
     pub auto_download_deno: bool,
     /// Skip the iTunes copyright lookup.
     pub no_copyright: bool,
-    /// ISO-639-2 code recorded when the lyrics cannot settle the language.
-    pub language: String,
+    /// Recorded when the lyrics cannot settle the language.
+    pub language: Language,
     pub max_attempts: u32,
     pub max_rate_limit_wait: u64,
 }
@@ -142,15 +144,16 @@ where
     }))
 }
 
-/// ID3v2.3 records the language as a three-letter ISO-639-2 code.
-fn validate_language(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.len() != 3 || !value.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        return Err(format!(
-            "--language expects a three-letter ISO-639-2 code such as {DEFAULT_LANGUAGE}, not {value:?}"
-        ));
-    }
-    Ok(value.to_ascii_lowercase())
+/// Accept a language by English name or by ISO-639-2/639-3 code.
+///
+/// The tag shows the name, so that is the natural thing to type, but the codes
+/// keep working because they are what the frames themselves carry.
+fn validate_language(value: &str) -> Result<Language, String> {
+    parse_language(value).ok_or_else(|| {
+        format!(
+            "--language expects a language name or an ISO-639-2 code such as {DEFAULT_LANGUAGE}, Chinese, eng, or zho, not {value:?}"
+        )
+    })
 }
 
 fn validate_official_options(
@@ -226,7 +229,7 @@ OPTIONS:
         --non-interactive             Never prompt for a token, Deno, or a replacement
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
         --no-copyright                Skip the iTunes copyright lookup entirely
-        --language <CODE>             Fallback ISO-639-2 language [default: eng]
+        --language <LANGUAGE>         Fallback language, by name or code [default: English]
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
     -h, --help                        Print help
@@ -275,9 +278,12 @@ METADATA:
         TSSE   the encoder-settings string FFmpeg leaves behind is removed
         TCOP   the copyright message, looked up per album on the iTunes
                Search API, which needs no account, key, or token
-        TLAN   the language, detected from the lyric text with its
-               timestamps stripped, falling back to --language when the
-               lyrics do not settle it
+        TLAN   the language as a readable name - English, Chinese,
+               Korean - detected from the lyric text with its timestamps
+               stripped, falling back to --language when the lyrics do not
+               settle it. ID3v2.3 specifies an ISO-639-2 code here, but the
+               name is what a tagger shows; the three-byte language field
+               inside the USLT frame keeps the code.
         SYLT   any synchronised-lyrics frame is removed, spotDL's included
 
     TSRC is left exactly as spotDL wrote it. iTunes publishes no ISRCs, and
@@ -348,11 +354,12 @@ mod tests {
     }
 
     #[test]
-    fn language_must_be_a_three_letter_code() {
-        assert_eq!(validate_language("JPN").unwrap(), "jpn");
-        assert_eq!(validate_language(" fra ").unwrap(), "fra");
+    fn language_is_taken_by_name_or_by_code() {
+        assert_eq!(validate_language("JPN").unwrap().name, "Japanese");
+        assert_eq!(validate_language(" fra ").unwrap().name, "French");
+        assert_eq!(validate_language("english").unwrap().code, "eng");
+        assert_eq!(validate_language("Chinese").unwrap().code, "zho");
         assert!(validate_language("en").is_err());
-        assert!(validate_language("english").is_err());
         assert!(validate_language("e1g").is_err());
     }
 

@@ -25,7 +25,7 @@ use id3::{
 };
 
 use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
-use crate::lyrics::{LYRICS_DESCRIPTION, detect_language, lyric_lines};
+use crate::lyrics::{LYRICS_DESCRIPTION, Language, detect_language, lyric_lines};
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
 const TAG_VERSION: Version = Version::Id3v23;
@@ -37,7 +37,8 @@ const TAG_VERSION: Version = Version::Id3v23;
 const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE"];
 /// The copyright message frame.
 const COPYRIGHT_FRAME: &str = "TCOP";
-/// The language frame, an ISO-639-2 code.
+/// The language frame. ID3v2.3 specifies an ISO-639-2 code here, but the
+/// readable name is what a tagger shows, so that is what is written.
 const LANGUAGE_FRAME: &str = "TLAN";
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -88,11 +89,15 @@ impl MetadataReport {
 /// Apply the download-time metadata rules to one audio file.
 ///
 /// `copyright` is the message to store, or `None` when no album matched, in
-/// which case the frame is left alone. `default_language` is the ISO-639-2
-/// code to record when the lyrics are not enough to detect one. Any `.lrc`
+/// which case the frame is left alone. `default_language` is recorded when the
+/// lyrics are not enough to detect one. Any `.lrc`
 /// file sitting next to `audio` is pasted into the `USLT` lyrics frame and then
 /// deleted, but only after the whole tag has been read back and checked.
-pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -> MetadataReport {
+pub fn finalize(
+    audio: &Path,
+    copyright: Option<&str>,
+    default_language: &Language,
+) -> MetadataReport {
     let mut report = MetadataReport::default();
 
     let mut tag = match Tag::read_from_path(audio) {
@@ -109,7 +114,7 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
 
     let sidecar = sibling_lyrics_file(audio);
     let mut lyrics = None;
-    let mut language = default_language.to_owned();
+    let mut language = default_language.clone();
     let mut detected = false;
     if let Some(sidecar) = &sidecar {
         match fs::read(sidecar) {
@@ -144,11 +149,11 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
     let sylt_removed = tag.synchronised_lyrics().count();
     tag.remove_all_synchronised_lyrics();
     set_text(&mut tag, COPYRIGHT_FRAME, copyright);
-    set_text(&mut tag, LANGUAGE_FRAME, Some(language.as_str()));
+    set_text(&mut tag, LANGUAGE_FRAME, Some(language.name.as_str()));
     if let Some(lyrics) = &lyrics {
         tag.remove_all_lyrics();
         tag.add_frame(Lyrics {
-            lang: language.clone(),
+            lang: language.code.clone(),
             description: LYRICS_DESCRIPTION.to_owned(),
             text: lyrics.clone(),
         });
@@ -162,7 +167,7 @@ pub fn finalize(audio: &Path, copyright: Option<&str>, default_language: &str) -
         return report;
     }
 
-    if let Err(reason) = verify(audio, copyright, &language, lyrics.as_deref()) {
+    if let Err(reason) = verify(audio, copyright, &language.name, lyrics.as_deref()) {
         report.fail(audio.to_path_buf(), reason);
         return report;
     }
@@ -267,7 +272,12 @@ fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lyrics::parse_language;
     use id3::frame::{Popularimeter, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat};
+
+    fn english() -> Language {
+        parse_language("English").unwrap()
+    }
     use std::env;
 
     struct TempDir(PathBuf);
@@ -344,7 +354,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
+        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
         assert_eq!(report.frames_stripped, 2);
@@ -371,7 +381,7 @@ mod tests {
         assert_eq!(report.languages_detected, 0);
         assert_eq!(
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
-            Some("eng")
+            Some("English")
         );
         // No synchronised frame is left, and the .lrc file went into the
         // ordinary lyrics frame with its timestamps intact.
@@ -407,7 +417,7 @@ mod tests {
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize(&audio, None, "eng");
+        let report = finalize(&audio, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.frames_stripped, 2);
         assert_eq!(report.lyrics_embedded, 0);
@@ -431,7 +441,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "[ar: Artist]\njust prose\n").unwrap();
 
-        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), "eng");
+        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
         assert!(!sidecar.exists());
@@ -451,7 +461,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "  \n\n").unwrap();
 
-        let report = finalize(&audio, None, "eng");
+        let report = finalize(&audio, None, &english());
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -473,14 +483,14 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, "eng");
+        let report = finalize(&audio, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.languages_detected, 1);
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
-            Some("fra")
+            Some("French")
         );
         assert_eq!(tag.lyrics().next().unwrap().lang, "fra");
     }
@@ -497,7 +507,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, "jpn");
+        let report = finalize(&audio, None, &parse_language("Japanese").unwrap());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
 
@@ -512,7 +522,7 @@ mod tests {
         assert_eq!(stored.lang, "jpn");
         assert_eq!(
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
-            Some("jpn")
+            Some("Japanese")
         );
     }
 }

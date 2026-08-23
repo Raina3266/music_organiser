@@ -17,4 +17,5 @@ pub use export::{
 };
 pub use files::FileError;
 pub use frames::{SUPPORTED_TAGS, TagSpec};
+pub use lyrics::{Language, parse_language};
 pub use metadata::{MetadataReport, album_of, finalize};
