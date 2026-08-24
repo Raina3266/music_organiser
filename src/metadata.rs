@@ -28,7 +28,7 @@ use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
 use crate::lyrics::{LYRICS_DESCRIPTION, Language, detect_language, lyric_lines};
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
-const TAG_VERSION: Version = Version::Id3v23;
+pub(crate) const TAG_VERSION: Version = Version::Id3v23;
 /// Frames removed from every download.
 ///
 /// `POPM` is the popularimeter spotDL fills from Spotify's popularity score —
@@ -41,7 +41,7 @@ const TAG_VERSION: Version = Version::Id3v23;
 /// competing date fields. `TDRC` is kept because it is the complete one.
 const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE", "TYER"];
 /// The copyright message frame.
-const COPYRIGHT_FRAME: &str = "TCOP";
+pub(crate) const COPYRIGHT_FRAME: &str = "TCOP";
 /// The language frame. ID3v2.3 specifies an ISO-639-2 code here, but the
 /// readable name is what a tagger shows, so that is what is written.
 const LANGUAGE_FRAME: &str = "TLAN";
@@ -214,14 +214,18 @@ pub fn finalize(
 /// `TPE1` because a compilation's tracks share an album artist but not a track
 /// artist.
 pub fn album_of(audio: &Path) -> Option<(String, String)> {
-    let tag = Tag::read_from_path(audio).ok()?;
+    album_key(&Tag::read_from_path(audio).ok()?)
+}
+
+/// The same key read from a tag already in hand.
+pub(crate) fn album_key(tag: &Tag) -> Option<(String, String)> {
     let artist = tag.album_artist().or_else(|| tag.artist())?.trim();
     let album = tag.album()?.trim();
     (!artist.is_empty() && !album.is_empty()).then(|| (artist.to_owned(), album.to_owned()))
 }
 
 /// Replace a text frame, leaving it untouched when there is no value to store.
-fn set_text(tag: &mut Tag, frame_id: &str, value: Option<&str>) {
+pub(crate) fn set_text(tag: &mut Tag, frame_id: &str, value: Option<&str>) {
     let Some(value) = value else {
         return;
     };

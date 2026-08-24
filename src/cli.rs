@@ -18,11 +18,15 @@ USAGE:
     ",
     env!("CARGO_PKG_NAME"),
     " export <FOLDER> [OUTPUT_CSV] [--overwrite]
+    ",
+    env!("CARGO_PKG_NAME"),
+    " copyright <FOLDER> [--only-missing] [--dry-run]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
     delete      Remove selected ID3 tags from a folder recursively
     export      Write every ID3 frame under a folder to one CSV file
+    copyright   Look the TCOP copyright message up again on iTunes
 
 EXAMPLES:
     ",
@@ -34,6 +38,9 @@ EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
     " export \"/music\" frames.csv
+    ",
+    env!("CARGO_PKG_NAME"),
+    " copyright \"/music\" --dry-run
 
 The download command reads one link per line and forces MP3 with synced
 lyrics. A line is a Spotify URL, a YouTube Music URL, or a
@@ -56,6 +63,12 @@ file has no such frame. Without OUTPUT_CSV it writes id3-frames.csv inside
 the scanned folder, and it refuses to replace an existing file unless
 --overwrite is given.
 
+The copyright command looks every album under a folder up on the iTunes Search
+API and writes the message it finds to TCOP. A file is written only when a
+copyright was found: a lookup that matches nothing, a lookup that fails, and a
+file naming no album all leave that file exactly as it was. --only-missing
+skips files that already carry a message.
+
 Run `",
     env!("CARGO_PKG_NAME"),
     " download --help` for command-specific help.
@@ -76,6 +89,11 @@ pub enum Command {
         output: PathBuf,
         overwrite: bool,
     },
+    Copyright {
+        folder: PathBuf,
+        only_missing: bool,
+        dry_run: bool,
+    },
     Help,
     Version,
 }
@@ -95,6 +113,7 @@ where
         "download" => parse_download(&args[1..]),
         "delete" => parse_delete(&args[1..]),
         "export" => parse_export(&args[1..]),
+        "copyright" => parse_copyright(&args[1..]),
         _ => Err(format!("unknown command {command:?}")),
     }
 }
@@ -173,6 +192,34 @@ fn parse_export(args: &[OsString]) -> Result<Command, String> {
         folder,
         output,
         overwrite,
+    })
+}
+
+fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
+    let mut positional = Vec::new();
+    let mut only_missing = false;
+    let mut dry_run = false;
+
+    for argument in args {
+        if argument == "--only-missing" {
+            only_missing = true;
+        } else if argument == "--dry-run" {
+            dry_run = true;
+        } else if argument.to_string_lossy().starts_with('-') {
+            return Err(format!("unknown option {:?}", argument.to_string_lossy()));
+        } else {
+            positional.push(argument);
+        }
+    }
+
+    if positional.len() != 1 {
+        return Err("copyright requires exactly one folder".to_owned());
+    }
+
+    Ok(Command::Copyright {
+        folder: PathBuf::from(positional[0]),
+        only_missing,
+        dry_run,
     })
 }
 
@@ -295,6 +342,34 @@ mod tests {
     fn rejects_export_without_a_folder() {
         assert!(parse_args(strings(&["export"])).is_err());
         assert!(parse_args(strings(&["export", "/music", "a.csv", "b.csv"])).is_err());
+    }
+
+    #[test]
+    fn parses_the_copyright_command() {
+        assert_eq!(
+            parse_args(strings(&[
+                "copyright",
+                "/music",
+                "--only-missing",
+                "--dry-run"
+            ]))
+            .unwrap(),
+            Command::Copyright {
+                folder: PathBuf::from("/music"),
+                only_missing: true,
+                dry_run: true,
+            }
+        );
+        assert_eq!(
+            parse_args(strings(&["copyright", "/music"])).unwrap(),
+            Command::Copyright {
+                folder: PathBuf::from("/music"),
+                only_missing: false,
+                dry_run: false,
+            }
+        );
+        assert!(parse_args(strings(&["copyright"])).is_err());
+        assert!(parse_args(strings(&["copyright", "/music", "/other"])).is_err());
     }
 
     #[test]

@@ -1,13 +1,14 @@
 # music-organiser
 
 `music-organiser` is a Rust command-line project for preparing and maintaining
-a local music library. One executable provides three related workflows:
+a local music library. One executable provides four related workflows:
 
 | Command | Purpose |
 |---|---|
 | `download` | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
 | `delete` | Remove selected ID3 frames recursively |
 | `export` | Write every ID3 frame found recursively into one CSV file |
+| `copyright` | Look the `TCOP` copyright message up again for music already on disk |
 
 The Cargo package and executable are currently named `music-tag-transfer`.
 Downloaded audio comes from spotDL's configured providers, not from Spotify.
@@ -22,6 +23,7 @@ Only download material you are permitted to keep.
 - [Download music](#download-music)
 - [Delete ID3 tags](#delete-id3-tags)
 - [Export ID3 frames to CSV](#export-id3-frames-to-csv)
+- [Refresh the copyright message](#refresh-the-copyright-message)
 - [Exit status](#exit-status)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -38,6 +40,7 @@ The individual workflows have these additional requirements:
 | Synced lyrics and language | Nothing extra; both are handled by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
+| `copyright` | Read/write access to the music folder and internet access for the iTunes Search API |
 | `export` | Read access to the music folder and write access to the CSV destination |
 
 Check the external programs before downloading:
@@ -127,6 +130,7 @@ Search API, which is open to anyone.
 music-tag-transfer download [OPTIONS] <INPUT_FILE>
 music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
 music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
+music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
 ```
 
 Global flags:
@@ -647,6 +651,7 @@ anything.
 
 ```text
 music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
+music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
 ```
 
 ```bash
@@ -696,6 +701,66 @@ ignored. Files that cannot be read are reported on stderr, left out of the
 CSV, and make the command exit with status 1; the rest of the library is still
 exported.
 
+## Refresh the copyright message
+
+The `download` command fills `TCOP` from the iTunes Search API as each file
+arrives. This command does the same for music that is already on disk, which
+is the way to fix a library downloaded before the lookup existed, or one whose
+lookups were skipped with `--no-copyright`.
+
+### Syntax
+
+```text
+music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
+```
+
+```bash
+music-tag-transfer copyright "/path/to/music" --dry-run
+music-tag-transfer copyright "/path/to/music"
+music-tag-transfer copyright "/path/to/music" --only-missing
+```
+
+| Flag | Effect |
+|---|---|
+| `--only-missing` | Leave files that already carry a copyright message alone, and never look their album up |
+| `--dry-run` | Report the same counts without writing any file |
+
+### A file is only written when a copyright was found
+
+Nothing is ever cleared. A file is left exactly as it was when:
+
+- iTunes has no confident match for its album;
+- the lookup fails, for instance with no network;
+- its tag names no album artist and album to search with;
+- it carries no ID3 tag at all;
+- the message found is the one it already has.
+
+Only an album that matches **both** the album artist and the album name in the
+tag is used, so a wrong copyright is never written. Misses and failures are
+printed as they happen and counted in the summary.
+
+### One request per album
+
+The album artist and album name in each tag are the search key, and the answer
+is remembered for the rest of the run, so a 12-track album costs one request
+rather than twelve. Requests are spaced 200 ms apart, and throttling responses
+are retried with a backoff that honours `Retry-After`. A library of 500 albums
+therefore takes roughly two minutes.
+
+Every changed file is written as ID3v2.3 through the same copy-edit-rename that
+the other commands use.
+
+### Seeing what changed
+
+`export` pairs well with this: dump the library, look at the
+`Copyright (TCOP)` column, run the refresh, and dump it again.
+
+```bash
+music-tag-transfer export "/path/to/music" before.csv
+music-tag-transfer copyright "/path/to/music"
+music-tag-transfer export "/path/to/music" after.csv
+```
+
 ## Exit status
 
 | Status | Meaning |
@@ -727,6 +792,10 @@ the tag, or the lookup failed and said so. Both are reported during the run,
 and neither stops anything else in the tag from being written. Reissues and
 regional editions are the usual cause of a miss; `--no-copyright` turns the
 lookup off if you would rather not see it.
+
+Run `music-tag-transfer copyright <FOLDER>` later to try those albums again;
+files whose lookup missed or failed are left untouched, so nothing is lost by
+retrying.
 
 ### A download needs Deno
 
@@ -785,6 +854,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+The copyright refresh is available as a library call, taking anything that
+implements `CopyrightLookup` so a caller can supply its own source:
+
+```rust
+use std::path::Path;
+use music_tag_transfer::{itunes, refresh_copyrights};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = itunes::Client::new()?;
+    let report = refresh_copyrights(Path::new("/path/to/music"), &mut client, false, true)?;
+    println!("Would write {} file(s)", report.files_updated);
+    Ok(())
+}
+```
+
 The same metadata rules can be applied to a single file that already has a
 `.lrc` sidecar next to it:
 
@@ -825,7 +909,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`DeleteReport`, `ExportReport`, `ExportError`, `MetadataReport`, `FileError`, and `TagSpec` are also exported,
+`DeleteReport`, `ExportReport`, `ExportError`, `CopyrightReport`, `CopyrightError`,
+`MetadataReport`, `FileError`, and `TagSpec` are also exported,
 along with `album_of` for reading the album key a lookup searches with. The
 `cli`, `download`, `itunes`, and `metadata` modules expose the executable's
 command configuration and entry points.

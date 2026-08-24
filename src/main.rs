@@ -2,7 +2,7 @@ use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, download, export_frames_to_csv,
+    delete_tags_recursively, download, export_frames_to_csv, itunes, refresh_copyrights,
 };
 
 fn main() -> ExitCode {
@@ -58,6 +58,47 @@ fn run() -> Result<ExitCode, String> {
                 report.files_unchanged,
                 report.files_without_tag,
             );
+
+            if report.errors.is_empty() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                for error in &report.errors {
+                    eprintln!("{}: {}", error.path.display(), error.message);
+                }
+                Err(format!(
+                    "{} file(s) could not be processed",
+                    report.errors.len()
+                ))
+            }
+        }
+        Command::Copyright {
+            folder,
+            only_missing,
+            dry_run,
+        } => {
+            let mut client = itunes::Client::new()?;
+            let report = refresh_copyrights(&folder, &mut client, only_missing, dry_run)
+                .map_err(|error| error.to_string())?;
+
+            let verb = if dry_run { "Would write" } else { "Wrote" };
+            println!(
+                "{verb} a copyright message to {} file(s) from {} album lookup(s). \
+                 Scanned {} file(s): {} already had the same message, {} were left \
+                 unchanged with no copyright to write, and {} were skipped as already \
+                 carrying one.",
+                report.files_updated,
+                report.albums_looked_up,
+                report.files_scanned,
+                report.files_unchanged,
+                report.files_without_copyright,
+                report.files_skipped,
+            );
+            if report.albums_without_match > 0 || report.albums_failed > 0 {
+                println!(
+                    "{} album(s) had no iTunes match and {} lookup(s) failed; their files keep whatever they had.",
+                    report.albums_without_match, report.albums_failed
+                );
+            }
 
             if report.errors.is_empty() {
                 Ok(ExitCode::SUCCESS)
