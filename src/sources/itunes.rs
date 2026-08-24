@@ -12,7 +12,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::sources::{http::Http, naming::matches_name};
+use crate::sources::{
+    http::Http,
+    naming::{Confidence, confidence},
+};
 use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "iTunes";
@@ -99,18 +102,28 @@ impl CopyrightLookup for Client {
     }
 }
 
-/// The copyright of the first result whose artist and album both match.
+/// The copyright of the closest result whose artist and album both match.
+///
+/// Closest, not first: a search for `Discovery` can return the deluxe edition
+/// ahead of the plain one, and the plain one is what was asked for.
 fn best_match(results: &[AlbumResult], artist: &str, album: &str) -> Option<String> {
     results
         .iter()
-        .find(|result| {
-            matches_name(result.artist_name.as_deref(), artist)
-                && matches_name(result.collection_name.as_deref(), album)
-        })
-        .and_then(|result| result.copyright.as_deref())
+        .filter_map(|result| Some((rank(result, artist, album)?, result)))
+        .min_by_key(|(rank, _)| *rank)
+        .and_then(|(_, result)| result.copyright.as_deref())
         .map(str::trim)
         .filter(|copyright| !copyright.is_empty())
         .map(str::to_owned)
+}
+
+/// How well a result matches, album first: two releases by one artist differ
+/// by their album name, so that is the more telling of the two.
+fn rank(result: &AlbumResult, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
+    Some((
+        confidence(result.collection_name.as_deref(), album)?,
+        confidence(result.artist_name.as_deref(), artist)?,
+    ))
 }
 
 #[cfg(test)]
@@ -201,5 +214,55 @@ mod tests {
     #[test]
     fn tolerates_a_response_with_no_results_field() {
         assert!(results(r#"{"resultCount":0}"#).is_empty());
+    }
+
+    /// Ranking, not order: iTunes lists the deluxe edition first here, and the
+    /// plain release is the one that was asked for.
+    #[test]
+    fn the_closest_release_wins_over_the_one_listed_first() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Daft Punk","collectionName":"Discovery (Deluxe Edition)",
+                 "copyright":"℗ 2015 the wrong one"},
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "copyright":"℗ 2001 Daft Life Limited"}
+            ]}"#,
+        );
+        assert_eq!(
+            best_match(&listed, "Daft Punk", "Discovery"),
+            Some("\u{2117} 2001 Daft Life Limited".to_owned())
+        );
+    }
+
+    /// The false positive that made this worth changing: a longer name is a
+    /// different record, and must not supply its copyright.
+    #[test]
+    fn a_longer_album_name_is_a_different_record() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Earth, Wind & Fire",
+                 "collectionName":"The Best Of Earth, Wind & Fire Vol. 1",
+                 "copyright":"℗ 1978 a different record"}
+            ]}"#,
+        );
+        assert_eq!(
+            best_match(&listed, "Earth, Wind & Fire", "Earth, Wind & Fire"),
+            None
+        );
+    }
+
+    /// Spelling differences between catalogues are not differences of record.
+    #[test]
+    fn matches_across_ampersands_and_accents() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Earth, Wind & Fire","collectionName":"I Am",
+                 "copyright":"℗ 1979 Columbia"}
+            ]}"#,
+        );
+        assert_eq!(
+            best_match(&listed, "Earth, Wind and Fire", "I Am"),
+            Some("\u{2117} 1979 Columbia".to_owned())
+        );
     }
 }

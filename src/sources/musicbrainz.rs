@@ -20,7 +20,7 @@ use serde::Deserialize;
 
 use crate::sources::{
     http::Http,
-    naming::{copyright_line, matches_name, year_of},
+    naming::{Confidence, confidence, copyright_line, year_of},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -136,10 +136,19 @@ impl Client {
             return Ok(None);
         };
 
-        let candidates = found
+        // Only a few releases can be opened, so they are opened closest
+        // first: a search for `Discovery` lists dozens of pressings and the
+        // deluxe edition is as likely as not to come back ahead of the plain
+        // one.
+        let mut candidates: Vec<(_, &ReleaseStub)> = found
             .releases
             .iter()
-            .filter(|release| is_the_release(release, artist, album))
+            .filter_map(|release| Some((rank(release, artist, album)?, release)))
+            .collect();
+        candidates.sort_by_key(|(rank, _)| *rank);
+        let candidates = candidates
+            .into_iter()
+            .map(|(_, release)| release)
             .take(MAX_RELEASES_FETCHED);
         // Releases are per-pressing and only some carry the relationships, so
         // the first few matches are opened until one of them has a copyright.
@@ -174,13 +183,15 @@ impl CopyrightLookup for Client {
     }
 }
 
-/// Whether a search result is the release that was asked for.
-fn is_the_release(release: &ReleaseStub, artist: &str, album: &str) -> bool {
-    matches_name(release.title.as_deref(), album)
-        && release
-            .artist_credit
-            .iter()
-            .any(|credit| matches_name(credit.name.as_deref(), artist))
+/// How well a search result matches, or `None` when it is a different release.
+fn rank(release: &ReleaseStub, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
+    let album = confidence(release.title.as_deref(), album)?;
+    let artist = release
+        .artist_credit
+        .iter()
+        .filter_map(|credit| confidence(credit.name.as_deref(), artist))
+        .min()?;
+    Some((album, artist))
 }
 
 /// The copyright line for a release, preferring ℗ over ©.
@@ -301,7 +312,7 @@ mod tests {
         let matching: Vec<&str> = found
             .releases
             .iter()
-            .filter(|release| is_the_release(release, "Daft Punk", "Discovery"))
+            .filter(|release| rank(release, "Daft Punk", "Discovery").is_some())
             .map(|release| release.id.as_str())
             .collect();
         assert_eq!(matching, ["two"]);

@@ -842,11 +842,28 @@ when:
 
 Only a release that matches **both** the album artist and the album name in the
 tag is used, whichever source answered, so a wrong copyright is never written.
-The comparison ignores case and punctuation, allows an edition suffix such as
-`(Deluxe Edition)`, and allows the `(2)` Discogs appends to a disambiguated
-artist. Misses and failures are printed as they happen and counted in the
-summary, and the summary names the other sources, since an album missing from
-one catalogue is often complete in another.
+
+The comparison has to absorb the ways catalogues disagree without ever merging
+two different records. It ignores case, punctuation, and accents, so a tag
+reading `Beyonce` finds Spotify's `Beyoncé`; it reads `&` as `and`, because
+one catalogue prints `Earth, Wind & Fire` and the next spells it out; and it
+ignores a leading `The`.
+
+An edition suffix is ignored **only when it says it is one** — bracketed, as in
+`(Deluxe Edition)`, `[Platinum Edition]`, or the `(2)` Discogs appends to a
+disambiguated artist; or spelled out of a small vocabulary of edition words, as
+in Spotify's `B'Day Deluxe Edition`. Anything else is a different record:
+`Vol. 1` and `Pt. 2` distinguish releases rather than editions, and a suffix
+naming a different recording — `(Live)`, `(Acoustic Version)`, `(Sped Up)`,
+`(Radio Edit)` — is never ignorable, because those carry their own copyright.
+
+Where several candidates match, the closest wins rather than the first listed,
+so a search for `Discovery` prefers the plain release over a deluxe edition
+that happened to come back ahead of it.
+
+Misses and failures are printed as they happen and counted in the summary, and
+the summary names the other sources, since an album missing from one catalogue
+is often complete in another.
 
 ### One request per album
 

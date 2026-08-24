@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::sources::{http::Http, naming::matches_name};
+use crate::sources::{
+    http::Http,
+    naming::{Confidence, confidence},
+};
 use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "Spotify";
@@ -135,8 +138,9 @@ impl Client {
             .albums
             .iter()
             .flat_map(|page| &page.items)
-            .find(|candidate| is_the_album(candidate, artist, album))
-            .and_then(|candidate| candidate.id.clone())
+            .filter_map(|candidate| Some((rank(candidate, artist, album)?, candidate)))
+            .min_by_key(|(rank, _)| *rank)
+            .and_then(|(_, candidate)| candidate.id.clone())
         else {
             return Ok(None);
         };
@@ -167,13 +171,19 @@ impl CopyrightLookup for Client {
     }
 }
 
-fn is_the_album(candidate: &AlbumStub, artist: &str, album: &str) -> bool {
-    candidate.id.is_some()
-        && matches_name(candidate.name.as_deref(), album)
-        && candidate
-            .artists
-            .iter()
-            .any(|credited| matches_name(credited.name.as_deref(), artist))
+/// How well a candidate matches, or `None` when it is a different release.
+///
+/// The album is ranked first: a search constrained to one artist separates its
+/// results by album name, so that is what decides between them.
+fn rank(candidate: &AlbumStub, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
+    candidate.id.as_ref()?;
+    let album = confidence(candidate.name.as_deref(), album)?;
+    let artist = candidate
+        .artists
+        .iter()
+        .filter_map(|credited| confidence(credited.name.as_deref(), artist))
+        .min()?;
+    Some((album, artist))
 }
 
 /// The album's copyright line, preferring ℗ over ©.
@@ -300,7 +310,7 @@ mod tests {
             .albums
             .iter()
             .flat_map(|page| &page.items)
-            .filter(|candidate| is_the_album(candidate, "Daft Punk", "Discovery"))
+            .filter(|candidate| rank(candidate, "Daft Punk", "Discovery").is_some())
             .filter_map(|candidate| candidate.id.as_deref())
             .collect();
         assert_eq!(chosen, ["two"]);

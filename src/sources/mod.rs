@@ -12,7 +12,7 @@ mod http;
 pub mod itunes;
 pub mod menu;
 pub mod musicbrainz;
-mod naming;
+pub mod naming;
 pub mod spotify;
 
 pub use http::DEFAULT_MAX_WAIT;
