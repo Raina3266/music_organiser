@@ -9,11 +9,14 @@ use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 
+use crate::LookupError;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
-/// Longest wait to honour before giving up. A server that asks for more than
-/// this is telling us to come back another day, not to sleep on it.
-const MAX_RATE_LIMIT_WAIT: u64 = 60;
+/// Longest wait to honour before treating the source as spent. A server that
+/// asks for more than this is telling us to come back another day, not to
+/// sleep on it.
+pub const DEFAULT_MAX_WAIT: u64 = 60;
 
 /// A blocking JSON client that keeps one source inside its rate limit.
 pub struct Http {
@@ -26,6 +29,8 @@ pub struct Http {
     last_request: Option<Instant>,
     /// Whether a 403 means "slow down" rather than "not allowed".
     forbidden_is_throttling: bool,
+    /// Longest `Retry-After` to sit through before giving up on the source.
+    max_wait: u64,
 }
 
 impl Http {
@@ -50,7 +55,15 @@ impl Http {
             min_interval,
             last_request: None,
             forbidden_is_throttling: false,
+            max_wait: DEFAULT_MAX_WAIT,
         })
+    }
+
+    /// How long a `Retry-After` may be before the source is treated as spent
+    /// rather than merely busy.
+    pub fn waiting_at_most(mut self, seconds: u64) -> Self {
+        self.max_wait = seconds;
+        self
     }
 
     /// Treat a 403 as throttling. The iTunes Search API answers 403 as well as
@@ -69,15 +82,15 @@ impl Http {
         url: &str,
         query: &[(&str, &str)],
         headers: &[(&str, &str)],
-    ) -> Result<Option<T>, String> {
+    ) -> Result<Option<T>, LookupError> {
         let Some(body) = self.get_text(url, query, headers)? else {
             return Ok(None);
         };
         // Some of these endpoints answer with text/javascript rather than
         // application/json, so the body is decoded and then parsed.
-        serde_json::from_str(&body)
-            .map(Some)
-            .map_err(|error| format!("{} returned malformed JSON: {error}", self.label))
+        serde_json::from_str(&body).map(Some).map_err(|error| {
+            LookupError::Album(format!("{} returned malformed JSON: {error}", self.label))
+        })
     }
 
     fn get_text(
@@ -85,7 +98,7 @@ impl Http {
         url: &str,
         query: &[(&str, &str)],
         headers: &[(&str, &str)],
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<String>, LookupError> {
         for retry in 0..=MAX_RATE_LIMIT_RETRIES {
             self.wait_for_the_rate_limit();
 
@@ -99,36 +112,42 @@ impl Http {
             let response = self
                 .runtime
                 .block_on(async move { request.send().await })
-                .map_err(|error| format!("{} request failed: {error}", self.label))?;
+                .map_err(|error| {
+                    LookupError::Album(format!("{} request failed: {error}", self.label))
+                })?;
 
             let status = response.status();
             if status == reqwest::StatusCode::NOT_FOUND {
                 return Ok(None);
             }
+            // A token does not repair itself, so every remaining album would
+            // fail the same way. Spend no more requests on it.
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(format!(
+                return Err(LookupError::Exhausted(format!(
                     "{} rejected the token (HTTP 401); it is wrong or has expired",
                     self.label
-                ));
+                )));
             }
 
             let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
                 || (self.forbidden_is_throttling && status == reqwest::StatusCode::FORBIDDEN);
             if throttled {
                 if retry == MAX_RATE_LIMIT_RETRIES {
-                    return Err(format!(
+                    return Err(LookupError::Exhausted(format!(
                         "{} kept throttling the lookup after {} attempts",
                         self.label,
                         MAX_RATE_LIMIT_RETRIES + 1
-                    ));
+                    )));
                 }
                 let wait = retry_after(&response).unwrap_or(2 << retry).max(1);
-                if wait > MAX_RATE_LIMIT_WAIT {
-                    return Err(format!(
-                        "{} requested a {wait}-second wait, exceeding the \
-                         {MAX_RATE_LIMIT_WAIT}-second safety limit",
-                        self.label
-                    ));
+                if wait > self.max_wait {
+                    return Err(LookupError::Exhausted(format!(
+                        "{} is rate limited for another {}, far past the {}-second limit \
+                         this run will wait",
+                        self.label,
+                        readable(wait),
+                        self.max_wait,
+                    )));
                 }
                 eprintln!(
                     "{} throttled the lookup; waiting {wait}s before retrying...",
@@ -140,12 +159,18 @@ impl Http {
             }
 
             if !status.is_success() {
-                return Err(format!("{} lookup failed (HTTP {status})", self.label));
+                return Err(LookupError::Album(format!(
+                    "{} lookup failed (HTTP {status})",
+                    self.label
+                )));
             }
 
             let body = response.text();
             return self.runtime.block_on(body).map(Some).map_err(|error| {
-                format!("{} returned an unreadable response: {error}", self.label)
+                LookupError::Album(format!(
+                    "{} returned an unreadable response: {error}",
+                    self.label
+                ))
             });
         }
 
@@ -163,6 +188,16 @@ impl Http {
             }
         }
         self.last_request = Some(Instant::now());
+    }
+}
+
+/// A duration a person can read at a glance, for a wait worth complaining
+/// about. `19302` means nothing; `5h 21m` explains itself.
+pub fn readable(seconds: u64) -> String {
+    match (seconds / 3600, (seconds % 3600) / 60, seconds % 60) {
+        (0, 0, seconds) => format!("{seconds}s"),
+        (0, minutes, seconds) => format!("{minutes}m {seconds}s"),
+        (hours, minutes, _) => format!("{hours}h {minutes}m"),
     }
 }
 
@@ -241,7 +276,10 @@ mod tests {
             .get_json::<Body>(&server.address, &[], &[])
             .expect_err("a 401 must fail");
 
-        assert!(error.contains("expired"), "{error}");
+        // A dead token is the source's problem, not this album's: it must be
+        // reported as exhaustion so the run stops asking.
+        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        assert!(error.to_string().contains("expired"), "{error}");
         // One attempt only: retrying a bad token just burns the rate limit.
         assert_eq!(server.requests().len(), 1);
     }
@@ -272,7 +310,9 @@ mod tests {
         let error = http
             .get_json::<Body>(&server.address, &[], &[])
             .expect_err("a plain 403 must fail");
-        assert!(error.contains("HTTP 403"), "{error}");
+        // A plain 403 is this request's failure, not the source giving up.
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+        assert!(error.to_string().contains("HTTP 403"), "{error}");
         assert_eq!(server.requests().len(), 1);
 
         let server = Server::replying(&[
@@ -297,7 +337,7 @@ mod tests {
             .get_json::<Body>(&server.address, &[], &[])
             .expect_err("garbage must not parse");
 
-        assert!(error.contains("malformed JSON"), "{error}");
+        assert!(error.to_string().contains("malformed JSON"), "{error}");
         server.requests();
     }
 
@@ -318,5 +358,73 @@ mod tests {
         // The first request goes out at once; only the second waits.
         assert!(started.elapsed() >= Duration::from_millis(300), "too quick");
         server.requests();
+    }
+
+    /// The failure from a real library scan: Spotify answered 429 with a
+    /// Retry-After of five hours. That is the source giving up on the run, not
+    /// one album failing, and it must be reported as such so the caller can
+    /// stop instead of asking hundreds more times.
+    #[test]
+    fn a_wait_beyond_the_budget_retires_the_source() {
+        let mut throttled = status("429 Too Many Requests", "");
+        throttled = throttled.replace("\r\nConnection:", "\r\nRetry-After: 19302\r\nConnection:");
+        let server = Server::replying(&[throttled]);
+        let mut http = client();
+
+        let error = http
+            .get_json::<Body>(&server.address, &[], &[])
+            .expect_err("a five-hour wait must not be sat through");
+
+        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        let message = error.to_string();
+        // The number of seconds means nothing to a person reading a log.
+        assert!(message.contains("5h 21m"), "{message}");
+        // Crucially: one request, not a retry storm.
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    /// The budget is a policy, not a constant: a caller willing to wait can.
+    #[test]
+    fn a_raised_budget_sits_through_the_wait_instead() {
+        let mut throttled = status("429 Too Many Requests", "");
+        throttled = throttled.replace("\r\nConnection:", "\r\nRetry-After: 1\r\nConnection:");
+        let server = Server::replying(&[throttled, ok(r#"{"answer":"waited"}"#)]);
+        let mut http = client().waiting_at_most(5);
+
+        let body: Option<Body> = http.get_json(&server.address, &[], &[]).unwrap();
+
+        assert_eq!(
+            body,
+            Some(Body {
+                answer: "waited".to_owned()
+            })
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    #[test]
+    fn persistent_throttling_retires_the_source_too() {
+        let throttled = status("429 Too Many Requests", "");
+        let server = Server::replying(&[
+            throttled.clone(),
+            throttled.clone(),
+            throttled.clone(),
+            throttled,
+        ]);
+        let mut http = client();
+
+        let error = http
+            .get_json::<Body>(&server.address, &[], &[])
+            .expect_err("a source that only ever throttles is spent");
+
+        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        server.requests();
+    }
+
+    #[test]
+    fn spells_a_wait_the_way_a_person_reads_one() {
+        assert_eq!(readable(45), "45s");
+        assert_eq!(readable(90), "1m 30s");
+        assert_eq!(readable(19302), "5h 21m");
     }
 }

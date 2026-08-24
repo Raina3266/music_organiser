@@ -20,6 +20,35 @@ use crate::{
     metadata::{COPYRIGHT_FRAME, TAG_VERSION, album_key, set_text},
 };
 
+/// Why a lookup did not produce a copyright.
+///
+/// The distinction matters more than it looks. One album that cannot be found
+/// says nothing about the next one, but a source that has started refusing
+/// every request — a spent rate limit, a dead token — will refuse the rest of
+/// the library too. Asking it again is not merely wasted: with a rate limit it
+/// deepens the hole. So the two are reported separately and handled
+/// differently.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum LookupError {
+    /// This album could not be looked up. Others may still succeed.
+    Album(String),
+    /// The source has stopped answering for longer than this run will wait,
+    /// and must not be asked again.
+    Exhausted(String),
+}
+
+impl fmt::Display for LookupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LookupError::Album(message) | LookupError::Exhausted(message) => {
+                formatter.write_str(message)
+            }
+        }
+    }
+}
+
+impl Error for LookupError {}
+
 /// One catalogue that can be asked for an album's copyright message.
 ///
 /// Every source in [`crate::sources`] implements this, and so does the fake in
@@ -29,7 +58,7 @@ use crate::{
 pub trait CopyrightLookup {
     /// The copyright message for an album, or `None` when nothing matched
     /// confidently enough to use.
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String>;
+    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError>;
 }
 
 /// What one refresh run did.
@@ -54,6 +83,9 @@ pub struct CopyrightReport {
     /// Albums whose lookup failed outright, which is a warning rather than a
     /// failure: their files keep whatever they had.
     pub albums_failed: usize,
+    /// Set when every source stopped answering and the scan gave up part way.
+    /// The files already written are still written; the rest were not visited.
+    pub stopped_early: bool,
     /// Files that could not be read or written, and why.
     pub errors: Vec<FileError>,
 }
@@ -93,7 +125,8 @@ pub fn refresh_copyrights(
     // One answer per album, kept whether it was a hit, a miss, or a failure:
     // an album that could not be looked up is not worth asking about again for
     // every one of its tracks.
-    let mut answers: HashMap<(String, String), Result<Option<String>, String>> = HashMap::new();
+    let mut answers: HashMap<(String, String), Result<Option<String>, LookupError>> =
+        HashMap::new();
 
     for path in files {
         let mut tag = match Tag::read_from_path(&path) {
@@ -148,13 +181,21 @@ pub fn refresh_copyrights(
                 report.files_without_copyright += 1;
                 continue;
             }
-            Err(error) => {
+            Err(LookupError::Album(error)) => {
                 if first_time {
                     report.albums_failed += 1;
                     eprintln!("{artist} - {album}: the lookup failed ({error}); left unchanged.");
                 }
                 report.files_without_copyright += 1;
                 continue;
+            }
+            // Nothing left to ask. Stopping here keeps the remaining albums
+            // unvisited rather than turning each one into an identical
+            // failure, and leaves them for a later run to pick up.
+            Err(LookupError::Exhausted(error)) => {
+                eprintln!("{error}");
+                report.stopped_early = true;
+                break;
             }
         };
 
@@ -226,7 +267,7 @@ mod tests {
     /// A lookup that answers from a table and counts what it was asked.
     #[derive(Default)]
     struct FakeLookup {
-        answers: HashMap<(String, String), Result<Option<String>, String>>,
+        answers: HashMap<(String, String), Result<Option<String>, LookupError>>,
         requests: Vec<(String, String)>,
     }
 
@@ -242,7 +283,7 @@ mod tests {
                         let answer = match answer {
                             Ok(Some(copyright)) => Ok(Some((*copyright).to_owned())),
                             Ok(None) => Ok(None),
-                            Err(error) => Err((*error).to_owned()),
+                            Err(error) => Err(LookupError::Album((*error).to_owned())),
                         };
                         (((*artist).to_owned(), (*album).to_owned()), answer)
                     })
@@ -253,7 +294,7 @@ mod tests {
     }
 
     impl CopyrightLookup for FakeLookup {
-        fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+        fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
             self.requests.push((artist.to_owned(), album.to_owned()));
             self.answers
                 .get(&(artist.to_owned(), album.to_owned()))
@@ -419,5 +460,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("cannot scan"));
+    }
+
+    /// The behaviour the Spotify rate limit exposed: once the source has
+    /// given up, the scan must stop rather than turn every remaining album
+    /// into an identical failure. What was written stays written.
+    #[test]
+    fn an_exhausted_source_stops_the_scan_instead_of_failing_every_album() {
+        let directory = TestDirectory::new();
+        for album in ["Discovery", "Homework", "Human After All", "Tron"] {
+            let path = directory.0.join(format!("{album}.mp3"));
+            tagged_file(&path, album, None);
+        }
+
+        struct Spent {
+            asked: usize,
+        }
+        impl CopyrightLookup for Spent {
+            fn copyright(&mut self, _: &str, album: &str) -> Result<Option<String>, LookupError> {
+                self.asked += 1;
+                match album {
+                    "Discovery" => Ok(Some("\u{2117} 2001 Daft Life".to_owned())),
+                    _ => Err(LookupError::Exhausted("rate limited for 5h 21m".to_owned())),
+                }
+            }
+        }
+
+        let mut lookup = Spent { asked: 0 };
+        let report = refresh_copyrights(&directory.0, &mut lookup, false, false).unwrap();
+
+        assert!(report.stopped_early);
+        // The album that worked is still written.
+        assert_eq!(report.files_updated, 1);
+        // The scan gave up at the first refusal rather than asking three more
+        // times: that is the whole point, since asking again deepens a ban.
+        assert_eq!(lookup.asked, 2);
+        assert_eq!(report.albums_failed, 0);
     }
 }

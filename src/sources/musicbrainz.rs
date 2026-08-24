@@ -18,11 +18,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::CopyrightLookup;
 use crate::sources::{
     http::Http,
     naming::{copyright_line, matches_name, year_of},
 };
+use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "MusicBrainz";
 /// Environment variable naming whoever is running this copy.
@@ -89,7 +89,7 @@ pub struct Client {
 
 impl Client {
     /// `contact` is the email address or URL to advertise in the User-Agent.
-    pub fn new(contact: Option<&str>) -> Result<Self, String> {
+    pub fn new(contact: Option<&str>, max_wait: u64) -> Result<Self, String> {
         let contact = contact
             .map(str::trim)
             .filter(|contact| !contact.is_empty())
@@ -100,7 +100,7 @@ impl Client {
             env!("CARGO_PKG_VERSION")
         );
         Ok(Self {
-            http: Http::new(LABEL, &user_agent, MIN_INTERVAL)?,
+            http: Http::new(LABEL, &user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
             releases: SEARCH_URL.to_owned(),
             albums: HashMap::new(),
         })
@@ -115,7 +115,7 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         let query = format!(
             "artist:{} AND release:{}",
             quote_for_lucene(artist),
@@ -160,7 +160,7 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         if artist.trim().is_empty() || album.trim().is_empty() {
             return Ok(None);
         }

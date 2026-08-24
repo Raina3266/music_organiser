@@ -14,11 +14,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::CopyrightLookup;
 use crate::sources::{
     http::Http,
     naming::{copyright_line, matches_name},
 };
+use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "Discogs";
 /// Environment variable holding the personal access token.
@@ -83,7 +83,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(token: &str) -> Result<Self, String> {
+    pub fn new(token: &str, max_wait: u64) -> Result<Self, String> {
         let token = token.trim();
         if token.is_empty() {
             return Err("the Discogs token is empty".to_owned());
@@ -95,7 +95,7 @@ impl Client {
             " +https://github.com/raina3266/music_organiser"
         );
         Ok(Self {
-            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?,
+            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
             // Discogs takes the token in a header rather than the query
             // string, which keeps it out of any proxy's access log.
             token: format!("Discogs token={token}"),
@@ -116,7 +116,7 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         let limit = RESULT_LIMIT.to_string();
         let authorization = self.token.clone();
         let search = self.search.clone();
@@ -161,7 +161,7 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         if artist.trim().is_empty() || album.trim().is_empty() {
             return Ok(None);
         }
@@ -224,7 +224,7 @@ fn year_of(release: &Release) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::testing::Server;
+    use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
 
     fn release(json: &str) -> Release {
         serde_json::from_str(json).unwrap()
@@ -311,7 +311,7 @@ mod tests {
 
     #[test]
     fn a_token_is_required() {
-        assert!(Client::new("   ").is_err());
+        assert!(Client::new("   ", DEFAULT_MAX_WAIT).is_err());
     }
 
     /// The search, then each candidate in turn — a search result carries no

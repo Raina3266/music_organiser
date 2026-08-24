@@ -9,7 +9,7 @@ use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
-use crate::sources::itunes::Client as ItunesClient;
+use crate::sources::{DEFAULT_MAX_WAIT, itunes::Client as ItunesClient};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -100,7 +100,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         None
     } else {
         println!("Copyright will be looked up per album through the iTunes Search API.");
-        Some(ItunesClient::new()?)
+        Some(ItunesClient::new(DEFAULT_MAX_WAIT)?)
     };
     let total = input.entries.len();
     let mut completed = 0usize;
@@ -370,7 +370,9 @@ fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<Str
         println!("The downloaded file has no album artist and album to search iTunes with.");
         return Ok(None);
     };
-    let copyright = client.copyright(&artist, &album)?;
+    let copyright = client
+        .copyright(&artist, &album)
+        .map_err(|error| error.to_string())?;
     if copyright.is_none() {
         println!("iTunes has no matching album for \"{artist} - {album}\".");
     }

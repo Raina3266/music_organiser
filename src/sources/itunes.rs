@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::CopyrightLookup;
 use crate::sources::{http::Http, naming::matches_name};
+use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "iTunes";
 
@@ -48,10 +48,12 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(max_wait: u64) -> Result<Self, String> {
         let user_agent = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         Ok(Self {
-            http: Http::new("iTunes", user_agent, MIN_INTERVAL)?.forbidden_is_throttling(),
+            http: Http::new("iTunes", user_agent, MIN_INTERVAL)?
+                .forbidden_is_throttling()
+                .waiting_at_most(max_wait),
             albums: HashMap::new(),
         })
     }
@@ -61,7 +63,7 @@ impl Client {
     ///
     /// A wrong copyright is worse than none, so a result is used only when both
     /// its artist and its album name match what was asked for.
-    pub fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    pub fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         if artist.trim().is_empty() || album.trim().is_empty() {
             return Ok(None);
         }
@@ -92,7 +94,7 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         Client::copyright(self, artist, album)
     }
 }

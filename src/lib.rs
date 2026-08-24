@@ -13,7 +13,9 @@ mod lyrics;
 pub mod metadata;
 pub mod sources;
 
-pub use copyright::{CopyrightError, CopyrightLookup, CopyrightReport, refresh_copyrights};
+pub use copyright::{
+    CopyrightError, CopyrightLookup, CopyrightReport, LookupError, refresh_copyrights,
+};
 pub use delete::{DeleteReport, delete_tags_recursively};
 pub use export::{
     DEFAULT_CSV_NAME, ExportError, ExportReport, default_csv_path, export_frames_to_csv,

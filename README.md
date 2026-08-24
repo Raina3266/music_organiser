@@ -130,7 +130,7 @@ Search API, which is open to anyone.
 music-tag-transfer download [OPTIONS] <INPUT_FILE>
 music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
 music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
-music-tag-transfer copyright <FOLDER> [--source NAME] [--only-missing] [--dry-run]
+music-tag-transfer copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
 ```
 
 Global flags:
@@ -722,7 +722,8 @@ music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missin
 
 | Flag | Effect |
 |---|---|
-| `--source NAME` | Which catalogue to ask: `itunes`, `musicbrainz`, `discogs`, or `spotify`. Omit it and an interactive run asks |
+| `--source NAME[,NAME...]` | Which catalogue to ask: `itunes`, `musicbrainz`, `discogs`, or `spotify`. Several names build a fallback chain, tried in order. Omit it and an interactive run asks |
+| `--max-wait SECONDS` | Longest rate-limit pause to sit through before giving up on a source. Default 60 |
 | `--token-file PATH` | Read the chosen source's token, or MusicBrainz's contact address, from a file |
 | `--token VALUE` | The same, given inline. Every process on the machine can read a command line, so prefer `--token-file` or the environment |
 | `--only-missing` | Leave files that already carry a copyright message alone, and never look their album up |
@@ -763,6 +764,51 @@ can come out worded differently depending on who was asked. Pick one source for
 a library and stay with it, or use `--only-missing` so an established message is
 never rewritten in another catalogue's style.
 
+### Surviving a rate limit
+
+Catalogues run out of patience, and a library is hundreds of albums. Spotify in
+particular measures its limit over a rolling window and answers a breach with a
+`Retry-After` of **hours**, not seconds.
+
+Two things follow from that, and both are handled:
+
+**A spent source is dropped, not retried.** A wait longer than `--max-wait`, a
+run of throttled responses, or a rejected token all mean the source has stopped
+answering — asking it again does not help and, with a rate limit, makes it
+worse. That source is retired for the rest of the run and named in the summary.
+
+**A fallback chain keeps the run alive.** Give `--source` several names and each
+album is offered to them in turn, so one catalogue running dry costs you that
+catalogue, not the run:
+
+```bash
+music-tag-transfer copyright "/path/to/music" --source spotify,musicbrainz,itunes
+```
+
+Spotify answers until its limit is spent, then MusicBrainz takes every
+remaining album, with iTunes behind it. The summary shows who supplied what:
+
+```text
+Looking copyrights up in Spotify, then MusicBrainz, then iTunes.
+Spotify is rate limited for another 5h 21m, far past the 60-second limit this run will wait.
+  Dropping Spotify for the rest of this run.
+  Spotify: 47 album(s), then stopped answering
+  MusicBrainz: 231 album(s)
+  iTunes: 12 album(s)
+```
+
+If every source is spent the scan **stops** rather than turning each remaining
+album into an identical failure. Files already written stay written, and
+`--only-missing` resumes from there:
+
+```bash
+music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
+```
+
+`--max-wait 900` will sit through a fifteen-minute pause if you would rather
+wait than switch source. It will not sit through five hours, and neither
+should you.
+
 ### Tokens and contact addresses
 
 Discogs and Spotify will not answer without a token. Each is read from
@@ -784,7 +830,9 @@ set, rather than scanning the whole library only to find it cannot ask anything.
 
 ### A file is only written when a copyright was found
 
-Nothing is ever cleared. A file is left exactly as it was when:
+Nothing is ever cleared — an existing `TCOP` survives every kind of miss,
+including a rate limit that ends the run. A file is left exactly as it was
+when:
 
 - the chosen source has no confident match for its album;
 - the lookup fails, for instance with no network;
@@ -811,12 +859,14 @@ limit:
 | Source | Spacing | Requests per album |
 |---|---|---|
 | `itunes` | 200 ms | One |
-| `spotify` | 200 ms | Two: the search answers with a simplified album that carries no copyrights, so the match is fetched in full |
+| `spotify` | 500 ms — deliberately slower than the API demands, because two requests per album at 200 ms earned a five-hour ban on a real library | Two: the search answers with a simplified album that carries no copyrights, so the match is fetched in full |
 | `musicbrainz` | 1.1 s, its published one-per-second limit | Up to four: the search, then up to three matching releases, since only some pressings carry the relationships |
 | `discogs` | 1.1 s, within its 60-per-minute limit | Up to four: a search result carries neither the credits nor a reliably split artist and title, so candidates have to be opened to be judged |
 
-A library of 500 albums therefore takes roughly two minutes on iTunes or
-Spotify, and up to half an hour on MusicBrainz or Discogs.
+A library of 500 albums therefore takes roughly two minutes on iTunes, about
+ten on Spotify, and up to half an hour on MusicBrainz or Discogs. For bulk
+work prefer MusicBrainz or iTunes and keep Spotify for filling gaps with
+`--only-missing`.
 
 Every changed file is written as ID3v2.3 through the same copy-edit-rename that
 the other commands use.
@@ -879,9 +929,19 @@ previous ones could not fill in.
 ### A token was rejected or has expired
 
 `Spotify rejected the token (HTTP 401)` and its Discogs equivalent mean the
-token itself, not the album. Spotify web-player tokens expire within the hour,
-so a long run can outlive one; fetch a fresh token and run again with
-`--only-missing` to pick up where it stopped.
+token itself, not the album. A token does not repair itself, so the source is
+retired immediately rather than spending the rest of the library discovering
+the same thing. Spotify web-player tokens expire within the hour, so a long run
+can outlive one; fetch a fresh token and run again with `--only-missing` to pick
+up where it stopped.
+
+### The run stopped part way through
+
+Every source it had was spent — a rate limit, an expired token, or a catalogue
+that would not stop throttling. This is deliberate: the alternative is several
+hundred identical failures and, on a rate limit, a longer ban. Nothing was lost.
+Re-run with `--only-missing`, and consider a fallback chain so the next run
+survives one catalogue giving up.
 
 ### A download needs Deno
 
@@ -945,10 +1005,13 @@ implements `CopyrightLookup` so a caller can supply its own source:
 
 ```rust
 use std::path::Path;
-use music_tag_transfer::{refresh_copyrights, sources::Source};
+use music_tag_transfer::{
+    refresh_copyrights,
+    sources::{DEFAULT_MAX_WAIT, Source},
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut lookup = Source::MusicBrainz.open(None)?;
+    let mut lookup = Source::MusicBrainz.open(None, DEFAULT_MAX_WAIT)?;
     let report = refresh_copyrights(Path::new("/path/to/music"), lookup.as_mut(), false, true)?;
     println!("Would write {} file(s)", report.files_updated);
     Ok(())

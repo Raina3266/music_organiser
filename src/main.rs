@@ -3,7 +3,7 @@ use std::{env, process::ExitCode};
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
     delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights,
-    sources::{Source, menu},
+    sources::{Chain, Source, menu},
 };
 
 fn main() -> ExitCode {
@@ -74,26 +74,54 @@ fn run() -> Result<ExitCode, String> {
         }
         Command::Copyright {
             folder,
-            source,
+            sources,
             token,
             token_file,
             only_missing,
             dry_run,
+            max_wait,
         } => {
             let interactive = menu::interactive();
             // Nobody has chosen yet: ask if there is anyone to ask, and
             // otherwise keep the default rather than stopping a scripted run.
-            let source = match source {
-                Some(source) => source,
-                None if interactive => menu::choose_source()?,
-                None => menu::DEFAULT,
+            let sources = match sources {
+                Some(sources) => sources,
+                None if interactive => vec![menu::choose_source()?],
+                None => vec![menu::DEFAULT],
             };
-            let credential =
-                menu::credential_for(source, token.as_deref(), token_file.as_deref(), interactive)?;
-            let mut lookup = source.open(credential.as_deref())?;
-            println!("Looking copyrights up in {}.", source.title());
 
-            let report = refresh_copyrights(&folder, lookup.as_mut(), only_missing, dry_run)
+            // Only the first source can be given a credential on the command
+            // line; the rest fall back to the environment, which is the only
+            // way one flag could serve several sources unambiguously.
+            let mut credentials = Vec::with_capacity(sources.len());
+            for (index, source) in sources.iter().enumerate() {
+                let (token, token_file) = if index == 0 {
+                    (token.as_deref(), token_file.as_deref())
+                } else {
+                    (None, None)
+                };
+                credentials.push(menu::credential_for(
+                    *source,
+                    token,
+                    token_file,
+                    interactive,
+                )?);
+            }
+
+            let mut chain = Chain::open(&sources, &credentials, max_wait)?;
+            let names = sources
+                .iter()
+                .map(|source| source.title())
+                .collect::<Vec<_>>()
+                .join(", then ");
+            println!("Looking copyrights up in {names}.");
+            if max_wait != music_tag_transfer::sources::DEFAULT_MAX_WAIT {
+                println!(
+                    "Waiting out a rate limit of up to {max_wait}s before giving up on a source."
+                );
+            }
+
+            let report = refresh_copyrights(&folder, &mut chain, only_missing, dry_run)
                 .map_err(|error| error.to_string())?;
 
             let verb = if dry_run { "Would write" } else { "Wrote" };
@@ -111,13 +139,38 @@ fn run() -> Result<ExitCode, String> {
             );
             if report.albums_without_match > 0 || report.albums_failed > 0 {
                 println!(
-                    "{} album(s) had no match on {} and {} lookup(s) failed; their files keep \
-                     whatever they had. Another source may know them: {}.",
-                    report.albums_without_match,
-                    source.title(),
-                    report.albums_failed,
-                    Source::names(),
+                    "{} album(s) matched nothing and {} lookup(s) failed; their files keep \
+                     whatever they had.",
+                    report.albums_without_match, report.albums_failed,
                 );
+            }
+            if sources.len() > 1 {
+                for (source, hits, answering) in chain.tally() {
+                    let state = if answering {
+                        ""
+                    } else {
+                        ", then stopped answering"
+                    };
+                    println!("  {}: {hits} album(s){state}", source.title());
+                }
+            }
+            if report.stopped_early {
+                println!(
+                    "The scan stopped early, so some files were never visited. Everything \
+                     written so far is written; re-run with --only-missing to carry on from \
+                     here once the limit clears."
+                );
+                if sources.len() == 1 {
+                    println!(
+                        "  A fallback chain keeps a run going when one catalogue runs dry, \
+                         for instance --source {},{}.",
+                        sources[0].key(),
+                        Source::ALL
+                            .iter()
+                            .find(|other| **other != sources[0])
+                            .map_or("itunes", |other| other.key()),
+                    );
+                }
             }
 
             if report.errors.is_empty() {

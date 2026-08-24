@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::CopyrightLookup;
 use crate::sources::{http::Http, naming::matches_name};
+use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "Spotify";
 /// Environment variable holding the access token.
@@ -23,7 +23,11 @@ pub const TOKEN_VARIABLE: &str = "SPOTIFY_ACCESS_TOKEN";
 
 const SEARCH_URL: &str = "https://api.spotify.com/v1/search";
 const ALBUM_URL: &str = "https://api.spotify.com/v1/albums";
-const MIN_INTERVAL: Duration = Duration::from_millis(200);
+/// Spotify measures its limit over a rolling window rather than per request,
+/// and answers a breach with a `Retry-After` of hours rather than seconds. Two
+/// requests per album at 200ms was fast enough to earn one on a real library,
+/// so the pace here is deliberately slower than the API strictly requires.
+const MIN_INTERVAL: Duration = Duration::from_millis(500);
 const RESULT_LIMIT: u8 = 10;
 
 #[derive(Debug, Deserialize)]
@@ -75,14 +79,14 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(token: &str) -> Result<Self, String> {
+    pub fn new(token: &str, max_wait: u64) -> Result<Self, String> {
         let token = token.trim();
         if token.is_empty() {
             return Err("the Spotify access token is empty".to_owned());
         }
         let user_agent = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         Ok(Self {
-            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?,
+            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
             authorization: format!("Bearer {token}"),
             search: SEARCH_URL.to_owned(),
             album_url: ALBUM_URL.to_owned(),
@@ -101,7 +105,7 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         // Spotify's field filters keep a search for an album from answering
         // with a track or a playlist that merely mentions it.
         let query = format!(
@@ -149,7 +153,7 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
+    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
         if artist.trim().is_empty() || album.trim().is_empty() {
             return Ok(None);
         }
@@ -222,7 +226,7 @@ fn quote_for_search(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::testing::Server;
+    use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
 
     fn album(json: &str) -> Album {
         serde_json::from_str(json).unwrap()
@@ -304,7 +308,7 @@ mod tests {
 
     #[test]
     fn a_token_is_required() {
-        assert!(Client::new("  ").is_err());
+        assert!(Client::new("  ", DEFAULT_MAX_WAIT).is_err());
     }
 
     /// The search answers with a simplified album that has no copyrights, so
@@ -355,7 +359,7 @@ mod tests {
             .copyright("Daft Punk", "Discovery")
             .expect_err("an expired token must not look like an album nobody has");
 
-        assert!(error.contains("expired"), "{error}");
+        assert!(error.to_string().contains("expired"), "{error}");
         server.requests();
     }
 

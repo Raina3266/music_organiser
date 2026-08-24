@@ -3,7 +3,7 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
-use crate::sources::Source;
+use crate::sources::{DEFAULT_MAX_WAIT, Source};
 
 pub const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -21,7 +21,7 @@ USAGE:
     " export <FOLDER> [OUTPUT_CSV] [--overwrite]
     ",
     env!("CARGO_PKG_NAME"),
-    " copyright <FOLDER> [--source NAME] [--only-missing] [--dry-run]
+    " copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
@@ -75,6 +75,14 @@ advance, and a run with no terminal uses iTunes. iTunes and MusicBrainz need no
 account; Discogs and Spotify need a token, taken from --token-file, from
 DISCOGS_TOKEN or SPOTIFY_ACCESS_TOKEN, or from a prompt.
 
+--source takes several names to build a fallback chain, tried in order per
+album: --source spotify,musicbrainz,itunes. A source that runs out of rate
+limit, keeps throttling, or rejects its token is retired for the rest of the
+run rather than asked again, and the albums it never reached go to the next
+one. When every source is spent the scan stops instead of failing each
+remaining album; re-run with --only-missing to carry on. --max-wait sets how
+long a rate-limit pause may be before a source is given up on (default 60s).
+
 A file is written only when a copyright was found: a lookup that matches
 nothing, a lookup that fails, and a file naming no album all leave that file
 exactly as it was. --only-missing skips files that already carry a message.
@@ -101,15 +109,20 @@ pub enum Command {
     },
     Copyright {
         folder: PathBuf,
-        /// The catalogue to ask. `None` means nobody has chosen yet, so an
-        /// interactive run asks and any other run takes the default.
-        source: Option<Source>,
+        /// The catalogues to ask, in order. `None` means nobody has chosen
+        /// yet, so an interactive run asks and any other run takes the
+        /// default. More than one is a fallback chain: if the first runs out
+        /// of rate limit, the rest of the library goes to the next.
+        sources: Option<Vec<Source>>,
         /// A token given on the command line. Every process on the machine can
         /// read this, so --token-file and the environment are preferred.
         token: Option<String>,
         token_file: Option<PathBuf>,
         only_missing: bool,
         dry_run: bool,
+        /// Longest rate-limit wait to sit through before giving up on a
+        /// source, in seconds.
+        max_wait: u64,
     },
     Help,
     Version,
@@ -214,11 +227,12 @@ fn parse_export(args: &[OsString]) -> Result<Command, String> {
 
 fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     let mut positional = Vec::new();
-    let mut source = None;
+    let mut sources = None;
     let mut token = None;
     let mut token_file = None;
     let mut only_missing = false;
     let mut dry_run = false;
+    let mut max_wait = DEFAULT_MAX_WAIT;
 
     let mut index = 0;
     while index < args.len() {
@@ -226,13 +240,22 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
         match argument.as_str() {
             "--only-missing" => only_missing = true,
             "--dry-run" => dry_run = true,
-            "--source" => source = Some(Source::parse(&next_value(args, &mut index, "--source")?)?),
+            "--source" => {
+                sources = Some(Source::parse_list(&next_value(
+                    args, &mut index, "--source",
+                )?)?);
+            }
+            "--max-wait" => {
+                max_wait = next_value(args, &mut index, "--max-wait")?
+                    .parse()
+                    .map_err(|_| "--max-wait expects a number of seconds".to_owned())?;
+            }
             "--token" => token = Some(next_value(args, &mut index, "--token")?),
             "--token-file" => {
                 token_file = Some(PathBuf::from(next_value(args, &mut index, "--token-file")?));
             }
             _ if argument.starts_with("--source=") => {
-                source = Some(Source::parse(&argument["--source=".len()..])?);
+                sources = Some(Source::parse_list(&argument["--source=".len()..])?);
             }
             _ if argument.starts_with("--token=") => {
                 token = Some(argument["--token=".len()..].to_owned());
@@ -257,11 +280,12 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
 
     Ok(Command::Copyright {
         folder: PathBuf::from(positional[0]),
-        source,
+        sources,
         token,
         token_file,
         only_missing,
         dry_run,
+        max_wait,
     })
 }
 
@@ -407,11 +431,12 @@ mod tests {
             .unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
-                source: None,
+                sources: None,
                 token: None,
                 token_file: None,
                 only_missing: true,
                 dry_run: true,
+                max_wait: DEFAULT_MAX_WAIT,
             }
         );
         // No --source is not a default: it is the question left unanswered,
@@ -420,11 +445,12 @@ mod tests {
             parse_args(strings(&["copyright", "/music"])).unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
-                source: None,
+                sources: None,
                 token: None,
                 token_file: None,
                 only_missing: false,
                 dry_run: false,
+                max_wait: DEFAULT_MAX_WAIT,
             }
         );
         assert!(parse_args(strings(&["copyright"])).is_err());
@@ -445,11 +471,12 @@ mod tests {
             .unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
-                source: Some(Source::MusicBrainz),
+                sources: Some(vec![Source::MusicBrainz]),
                 token: None,
                 token_file: Some(PathBuf::from("contact.txt")),
                 only_missing: false,
                 dry_run: false,
+                max_wait: DEFAULT_MAX_WAIT,
             }
         );
         // The --option=value spelling works too, and so do the short names.
@@ -457,11 +484,12 @@ mod tests {
             parse_args(strings(&["copyright", "/music", "--source=discogs"])).unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
-                source: Some(Source::Discogs),
+                sources: Some(vec![Source::Discogs]),
                 token: None,
                 token_file: None,
                 only_missing: false,
                 dry_run: false,
+                max_wait: DEFAULT_MAX_WAIT,
             }
         );
     }
@@ -472,6 +500,20 @@ mod tests {
             parse_args(strings(&["copyright", "/music", "--source", "bandcamp"])).unwrap_err();
         assert!(error.contains("unknown copyright source"));
         assert!(parse_args(strings(&["copyright", "/music", "--source"])).is_err());
+        // A comma-separated list is a fallback chain, de-duplicated in order.
+        let Command::Copyright { sources, .. } = parse_args(strings(&[
+            "copyright",
+            "/music",
+            "--source",
+            "spotify,musicbrainz,spotify,itunes",
+        ]))
+        .unwrap() else {
+            panic!("expected the copyright command");
+        };
+        assert_eq!(
+            sources,
+            Some(vec![Source::Spotify, Source::MusicBrainz, Source::Itunes])
+        );
         assert!(
             parse_args(strings(&[
                 "copyright",
