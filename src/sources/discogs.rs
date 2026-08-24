@@ -102,7 +102,8 @@ impl Client {
         Ok(Self {
             http: Http::new(LABEL, user_agent, MIN_INTERVAL)?
                 .waiting_at_most(limits.max_wait)
-                .attempting_at_most(limits.max_attempts),
+                .attempting_at_most(limits.max_attempts)
+                .waiting_out_throttling(limits.max_throttle_retries),
             // Discogs takes the token in a header rather than the query
             // string, which keeps it out of any proxy's access log.
             token: format!("Discogs token={token}"),

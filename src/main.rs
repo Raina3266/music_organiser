@@ -149,6 +149,12 @@ fn run() -> Result<ExitCode, String> {
                     report.albums_without_match, report.albums_failed,
                 );
             }
+            let set_aside: Vec<&'static str> = chain
+                .tally()
+                .iter()
+                .filter(|(_, _, answering)| !answering)
+                .map(|(source, _, _)| source.title())
+                .collect();
             if sources.len() > 1 {
                 for (source, hits, answering) in chain.tally() {
                     let state = if answering {
@@ -159,16 +165,16 @@ fn run() -> Result<ExitCode, String> {
                     println!("  {}: {hits} album(s){state}", source.title());
                 }
             }
-            if report.stopped_early {
+            if !set_aside.is_empty() {
                 println!(
-                    "The scan stopped early, so some files were never visited. Everything \
-                     written so far is written; re-run with --only-missing to carry on from \
-                     here once the limit clears."
+                    "Set aside for the rest of the run: {}. Every file was still visited; \
+                     re-run with --only-missing to fill in what they could not answer.",
+                    set_aside.join(", ")
                 );
                 if sources.len() == 1 {
                     println!(
-                        "  A fallback chain keeps a run going when one catalogue runs dry, \
-                         for instance --source {},{}.",
+                        "  A fallback chain answers from another catalogue when one runs \
+                         dry, for instance --source {},{}.",
                         sources[0].key(),
                         Source::ALL
                             .iter()

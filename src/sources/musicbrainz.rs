@@ -152,7 +152,8 @@ impl Client {
         Ok(Self {
             http: Http::new(LABEL, &user_agent, MIN_INTERVAL)?
                 .waiting_at_most(limits.max_wait)
-                .attempting_at_most(limits.max_attempts),
+                .attempting_at_most(limits.max_attempts)
+                .waiting_out_throttling(limits.max_throttle_retries),
             releases: SEARCH_URL.to_owned(),
             recordings: RECORDING_URL.to_owned(),
             albums: HashMap::new(),

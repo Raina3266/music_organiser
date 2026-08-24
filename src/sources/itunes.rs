@@ -64,7 +64,8 @@ impl Client {
             http: Http::new("iTunes", user_agent, MIN_INTERVAL)?
                 .forbidden_is_throttling()
                 .waiting_at_most(limits.max_wait)
-                .attempting_at_most(limits.max_attempts),
+                .attempting_at_most(limits.max_attempts)
+                .waiting_out_throttling(limits.max_throttle_retries),
             albums: HashMap::new(),
         })
     }

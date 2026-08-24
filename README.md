@@ -753,6 +753,7 @@ music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missin
 | `--csv PATH` | Write a before-and-after row for every file visited |
 | `--overwrite` | Let `--csv` replace an existing report |
 | `--max-attempts N` | How many times to try one request before giving up on that album (5 by default) |
+| `--max-throttle-retries N` | How many times to wait out throttling before skipping that album (30 by default) |
 | `--max-wait SECONDS` | Longest rate-limit pause to sit through before setting a source aside (60 by default) |
 
 ### Choosing where the copyright comes from
@@ -969,9 +970,14 @@ differently.
 
 **The server says slow down.** A `429`, or a `503` — which is how MusicBrainz
 signals a breached rate limit rather than the `429` you might expect — is
-waited out, honouring `Retry-After`. A pause longer than `--max-wait` means the
-catalogue is telling you to come back another day, so that source is set aside
-for the rest of the run rather than asked again.
+waited out, honouring `Retry-After`, and retried `--max-throttle-retries`
+times (**30** by default). Running out of those skips that album and the scan
+carries on: throttling passes, and the album after this one will very likely
+go through, so one album's bad luck is never a reason to stop.
+
+The exception is a `Retry-After` measured in hours. No number of retries
+shortens that, so the source is **set aside** — stopped being asked — while
+the run itself continues to the end.
 
 **Something went wrong in transit.** A timeout, a dropped connection, a `500`
 or a `502` says nothing about the album, so the request is simply tried again
@@ -988,10 +994,25 @@ Daft Punk - Discovery: the lookup failed (iTunes request failed after 3 attempts
 ```
 
 One album failing says nothing about the next. **Three in a row** says the
-network is down or the catalogue is refusing everyone, so the source is treated
-as unreachable at that point — otherwise a whole library would grind through
-five attempts each to discover the same thing hours later. A single success
-clears the count, so an occasional blip never accumulates into a false verdict.
+network is down or the catalogue is refusing everyone, so the source is set
+aside at that point — otherwise a whole library would grind through five
+attempts each to discover the same thing hours later. A single success clears
+the count, so an occasional blip never accumulates into a false verdict.
+
+### The scan always finishes
+
+Setting a source aside stops it being *asked*; it never stops the run. Every
+file under the folder is still visited and still gets a row in `--csv`,
+including the ones nobody could answer for — so the report is a complete
+account of the library rather than however far the scan got before something
+went wrong. With a fallback chain the remaining catalogues simply take over.
+
+A reason is printed once, not once per album. A source that has stopped
+answering would otherwise repeat itself for every remaining album in the
+library, which buries the part of the output worth reading.
+
+Nothing is lost either way: a file nobody could answer for is left exactly as
+it was, so `--only-missing` picks it up on a later run.
 
 All of this lives in one place and applies to every request each source makes,
 searches and detail fetches alike.

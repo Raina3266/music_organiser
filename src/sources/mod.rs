@@ -15,7 +15,7 @@ pub mod musicbrainz;
 pub mod naming;
 pub mod spotify;
 
-pub use http::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_WAIT};
+pub use http::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_THROTTLE_RETRIES, DEFAULT_MAX_WAIT};
 
 /// How hard a run tries before giving up, on one request and on one source.
 ///
@@ -27,6 +27,9 @@ pub struct Limits {
     pub max_wait: u64,
     /// How many times to try one request before giving up on that album.
     pub max_attempts: u32,
+    /// How many times to wait out throttling before giving up on that album.
+    /// Running out skips the album; it never stops the run.
+    pub max_throttle_retries: u32,
 }
 
 impl Default for Limits {
@@ -34,6 +37,7 @@ impl Default for Limits {
         Self {
             max_wait: DEFAULT_MAX_WAIT,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            max_throttle_retries: DEFAULT_MAX_THROTTLE_RETRIES,
         }
     }
 }
@@ -323,11 +327,14 @@ impl CopyrightLookup for Chain {
             }
         }
 
+        // Every source set aside is not a reason to stop. The scan carries on
+        // to the end so that every file is visited and accounted for; there is
+        // simply nobody left to ask, which is this album's problem and not the
+        // run's. No further requests are made, so it costs nothing but the
+        // walk itself.
         if self.links.iter().all(|link| !link.answering) {
-            return Err(LookupError::Exhausted(
-                "Every source has stopped answering; stopping here rather than \
-                 failing each remaining album in turn."
-                    .to_owned(),
+            return Err(LookupError::Album(
+                "no source is answering any more".to_owned(),
             ));
         }
         match failure {
@@ -473,8 +480,11 @@ mod tests {
         assert_eq!(tally[1].1, 2);
     }
 
+    /// With every source set aside there is nobody to ask, which is this
+    /// album's problem rather than the run's: the scan still has to finish and
+    /// account for every remaining file.
     #[test]
-    fn the_chain_reports_exhaustion_only_once_nobody_is_left() {
+    fn every_source_set_aside_is_an_album_failure_not_the_end_of_the_run() {
         let mut chain = chain_of(vec![
             vec![Err(LookupError::Exhausted("spent".into()))],
             vec![Err(LookupError::Exhausted("spent too".into()))],
@@ -482,10 +492,17 @@ mod tests {
 
         let error = chain
             .copyright(&wanting("Daft Punk", "Discovery"))
-            .expect_err("with every source dead there is nothing to do");
+            .expect_err("there is nobody left to ask");
 
-        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
         assert_eq!(chain.still_answering(), 0);
+
+        // And the next album costs no requests at all, since every source is
+        // already set aside.
+        let error = chain
+            .copyright(&wanting("Daft Punk", "Homework"))
+            .expect_err("still nobody left");
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
     }
 
     /// One album failing on every source is still just that album failing.

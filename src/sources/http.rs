@@ -16,7 +16,13 @@ use crate::LookupError;
 /// Generous, because MusicBrainz in particular does answer slowly under load
 /// and a timeout that fires early turns a slow success into a retried failure.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_RATE_LIMIT_RETRIES: u32 = 3;
+/// How many times to wait out a throttled request before giving up on that
+/// album.
+///
+/// Generous, because throttling passes: the waits are seconds and the album
+/// after this one will very likely go through. Running out is a reason to skip
+/// one album, never a reason to stop.
+pub const DEFAULT_MAX_THROTTLE_RETRIES: u32 = 30;
 /// Longest wait to honour before treating the source as spent. A server that
 /// asks for more than this is telling us to come back another day, not to
 /// sleep on it.
@@ -48,6 +54,8 @@ pub struct Http {
     max_wait: u64,
     /// How many times to try one request before giving up on that album.
     max_attempts: u32,
+    /// How many times to wait out throttling before giving up on that album.
+    max_throttle_retries: u32,
     /// Requests that have given up since the last success.
     consecutive_failures: u32,
 }
@@ -76,6 +84,7 @@ impl Http {
             forbidden_is_throttling: false,
             max_wait: DEFAULT_MAX_WAIT,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
+            max_throttle_retries: DEFAULT_MAX_THROTTLE_RETRIES,
             consecutive_failures: 0,
         })
     }
@@ -90,6 +99,12 @@ impl Http {
     /// How many times to try one request before giving up on that album.
     pub fn attempting_at_most(mut self, attempts: u32) -> Self {
         self.max_attempts = attempts.max(1);
+        self
+    }
+
+    /// How many times to wait out throttling before giving up on that album.
+    pub fn waiting_out_throttling(mut self, retries: u32) -> Self {
+        self.max_throttle_retries = retries.max(1);
         self
     }
 
@@ -178,13 +193,23 @@ impl Http {
 
             if self.is_throttling(status) {
                 throttles += 1;
-                if throttles > MAX_RATE_LIMIT_RETRIES {
-                    return Err(LookupError::Exhausted(format!(
-                        "{} kept throttling the lookup after {throttles} attempts",
-                        self.label
+                // Running out of patience with one album says nothing about
+                // the next: throttling passes, and the album after this one
+                // will very likely go through. So this gives up on the album
+                // and leaves the source in play.
+                if throttles > self.max_throttle_retries {
+                    return Err(LookupError::Album(format!(
+                        "{} kept throttling through all {} retries",
+                        self.label, self.max_throttle_retries
                     )));
                 }
-                let wait = retry_after(&response).unwrap_or(1 << throttles).max(1);
+                let wait = retry_after(&response)
+                    .unwrap_or_else(|| (1u64 << throttles.min(6)).min(MAX_BACKOFF))
+                    .max(1);
+                // A wait measured in hours cannot be sat through, and no
+                // number of retries will shorten it. That is the one case
+                // where the source is set aside -- the scan still finishes,
+                // it simply stops asking this catalogue.
                 if wait > self.max_wait {
                     return Err(LookupError::Exhausted(format!(
                         "{} is rate limited for another {}, far past the {}-second limit \
@@ -195,8 +220,8 @@ impl Http {
                     )));
                 }
                 eprintln!(
-                    "{} throttled the lookup; waiting {wait}s before retrying...",
-                    self.label
+                    "{} throttled the lookup; waiting {wait}s before retry {throttles} of {}...",
+                    self.label, self.max_throttle_retries
                 );
                 self.sleep(wait);
                 continue;
@@ -325,7 +350,10 @@ mod tests {
     }
 
     fn client() -> Http {
-        Http::new("Test", "music-tag-transfer/test", Duration::from_millis(1)).unwrap()
+        Http::new("Test", "music-tag-transfer/test", Duration::from_millis(1))
+            .unwrap()
+            // The default of thirty would make a throttling test crawl.
+            .waiting_out_throttling(3)
     }
 
     #[test]
@@ -503,23 +531,23 @@ mod tests {
         assert_eq!(server.requests().len(), 2);
     }
 
+    /// Throttling that never clears costs one album, not the run. The source
+    /// keeps answering, because throttling passes and the next album will very
+    /// likely go through.
     #[test]
-    fn persistent_throttling_retires_the_source_too() {
+    fn throttling_that_never_clears_only_costs_that_album() {
         let throttled = status("429 Too Many Requests", "");
-        let server = Server::replying(&[
-            throttled.clone(),
-            throttled.clone(),
-            throttled.clone(),
-            throttled,
-        ]);
-        let mut http = client();
+        let server = Server::replying(&[throttled.clone(), throttled.clone(), throttled]);
+        let mut http = client().waiting_out_throttling(2);
 
         let error = http
             .get_json::<Body>(&server.address, &[], &[])
-            .expect_err("a source that only ever throttles is spent");
+            .expect_err("it never stopped throttling");
 
-        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
-        server.requests();
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+        assert!(error.to_string().contains("all 2 retries"), "{error}");
+        // The retries were actually spent before giving up.
+        assert_eq!(server.requests().len(), 3);
     }
 
     #[test]

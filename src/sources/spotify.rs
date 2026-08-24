@@ -113,7 +113,8 @@ impl Client {
         Ok(Self {
             http: Http::new(LABEL, user_agent, MIN_INTERVAL)?
                 .waiting_at_most(limits.max_wait)
-                .attempting_at_most(limits.max_attempts),
+                .attempting_at_most(limits.max_attempts)
+                .waiting_out_throttling(limits.max_throttle_retries),
             authorization: format!("Bearer {token}"),
             search: SEARCH_URL.to_owned(),
             album_url: ALBUM_URL.to_owned(),

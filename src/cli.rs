@@ -90,12 +90,17 @@ A file is written only when a copyright was found: a lookup that matches
 nothing, a lookup that fails, and a file naming no album all leave that file
 exactly as it was. --only-missing skips files that already carry a message.
 
+A throttled request is waited out and retried --max-throttle-retries times
+(30 by default); running out of those skips that album and the scan carries
+on, since throttling passes and the next album will very likely go through.
 A request that times out or hits a server error is retried with a growing
-pause between attempts, --max-attempts times (5 by default) before that album
-is given up on and the scan moves to the next. A source that gives up three
-albums in a row is treated as unreachable rather than retried for every
-remaining album. --max-wait caps how long a rate-limit pause may be before a
-source is set aside.
+pause, --max-attempts times (5 by default), before that album is likewise
+skipped.
+
+The scan always visits every file. A source is only ever set aside -- stopped
+being asked, while the run continues -- when it asks for a wait longer than
+--max-wait, when its token is rejected, or when three albums in a row cannot
+reach it at all.
 
 --csv PATH writes one row per file showing what it held, what the run would
 write, and what became of it. With --dry-run that is a preview to read before
@@ -271,6 +276,15 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
                 limits.max_wait = next_value(args, &mut index, "--max-wait")?
                     .parse()
                     .map_err(|_| "--max-wait expects a number of seconds".to_owned())?;
+            }
+            "--max-throttle-retries" => {
+                let retries: u32 = next_value(args, &mut index, "--max-throttle-retries")?
+                    .parse()
+                    .map_err(|_| "--max-throttle-retries expects a number".to_owned())?;
+                if retries == 0 {
+                    return Err("--max-throttle-retries must be at least 1".to_owned());
+                }
+                limits.max_throttle_retries = retries;
             }
             "--max-attempts" => {
                 let attempts: u32 = next_value(args, &mut index, "--max-attempts")?
