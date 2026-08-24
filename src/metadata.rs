@@ -60,6 +60,8 @@ pub struct MetadataReport {
     /// Files whose copyright lookup failed outright. The rest of the tag is
     /// still rewritten, so this is a warning rather than a failure.
     pub copyright_lookups_failed: usize,
+    /// Files whose `TLAN` language a catalogue supplied.
+    pub languages_looked_up: usize,
     /// Files whose `TLAN` language was detected from their lyrics rather than
     /// taken from the configured default.
     pub languages_detected: usize,
@@ -86,6 +88,7 @@ impl MetadataReport {
         self.copyrights_written += other.copyrights_written;
         self.copyright_lookups_failed += other.copyright_lookups_failed;
         self.languages_detected += other.languages_detected;
+        self.languages_looked_up += other.languages_looked_up;
         self.lyrics_embedded += other.lyrics_embedded;
         self.lines_embedded += other.lines_embedded;
         self.sylt_frames_removed += other.sylt_frames_removed;
@@ -105,13 +108,20 @@ impl MetadataReport {
 /// Apply the download-time metadata rules to one audio file.
 ///
 /// `copyright` is the message to store, or `None` when no album matched, in
-/// which case the frame is left alone. `default_language` is recorded when the
-/// lyrics are not enough to detect one. Any `.lrc`
-/// file sitting next to `audio` is pasted into the `USLT` lyrics frame and then
-/// deleted, but only after the whole tag has been read back and checked.
+/// which case the frame is left alone.
+///
+/// `known_language` is a language a catalogue has already settled, which is
+/// taken as authoritative: it describes the song rather than guessing at its
+/// text. `None` means nobody knew, and the lyrics are read for a guess;
+/// `default_language` is recorded when even that comes to nothing.
+///
+/// Any `.lrc` file sitting next to `audio` is pasted into the `USLT` lyrics
+/// frame and then deleted, but only after the whole tag has been read back and
+/// checked.
 pub fn finalize(
     audio: &Path,
     copyright: Option<&str>,
+    known_language: Option<&Language>,
     default_language: &Language,
 ) -> MetadataReport {
     let mut report = MetadataReport::default();
@@ -130,7 +140,9 @@ pub fn finalize(
 
     let sidecar = sibling_lyrics_file(audio);
     let mut lyrics = None;
-    let mut language = default_language.clone();
+    let mut language = known_language
+        .cloned()
+        .unwrap_or_else(|| default_language.clone());
     let mut detected = false;
     if let Some(sidecar) = &sidecar {
         match fs::read(sidecar) {
@@ -140,7 +152,12 @@ pub fn finalize(
                     report.fail(sidecar.clone(), "the .lrc file is empty");
                     return report;
                 }
-                if let Some(guess) = detect_language(&lyric_lines(&text)) {
+                // Only guess when nothing authoritative was supplied: a
+                // catalogue that names the language knows better than a
+                // detector reading two lines of a chorus.
+                if known_language.is_none()
+                    && let Some(guess) = detect_language(&lyric_lines(&text))
+                {
                     language = guess;
                     detected = true;
                 }
@@ -207,6 +224,7 @@ pub fn finalize(
     report.frames_stripped = frames_stripped;
     report.copyrights_written = usize::from(copyright.is_some());
     report.languages_detected = usize::from(detected);
+    report.languages_looked_up = usize::from(known_language.is_some());
     report
 }
 
@@ -445,7 +463,12 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), &english());
+        let report = finalize(
+            &audio,
+            Some("\u{2117} 2001 Daft Life Limited"),
+            None,
+            &english(),
+        );
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
         assert_eq!(report.frames_stripped, 3);
@@ -514,7 +537,7 @@ mod tests {
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize(&audio, None, &english());
+        let report = finalize(&audio, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.frames_stripped, 3);
         assert_eq!(report.lyrics_embedded, 0);
@@ -544,7 +567,12 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "[ar: Artist]\njust prose\n").unwrap();
 
-        let report = finalize(&audio, Some("\u{2117} 2001 Daft Life Limited"), &english());
+        let report = finalize(
+            &audio,
+            Some("\u{2117} 2001 Daft Life Limited"),
+            None,
+            &english(),
+        );
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
         assert!(!sidecar.exists());
@@ -564,7 +592,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "  \n\n").unwrap();
 
-        let report = finalize(&audio, None, &english());
+        let report = finalize(&audio, None, None, &english());
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -586,7 +614,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, &english());
+        let report = finalize(&audio, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.languages_detected, 1);
 
@@ -610,7 +638,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, &parse_language("Japanese").unwrap());
+        let report = finalize(&audio, None, None, &parse_language("Japanese").unwrap());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
 
@@ -695,5 +723,77 @@ mod tests {
         let mut tag = Tag::with_version(Version::Id3v23);
         tag.set_album_artist("Daft Punk");
         assert!(album_evidence(&tag).is_none());
+    }
+
+    /// A catalogue that names the language is trusted over the detector: it
+    /// describes the song, where the detector only reads whatever text the
+    /// .lrc happens to hold.
+    #[test]
+    fn a_known_language_beats_what_the_lyrics_look_like() {
+        let directory = TempDir::new("known-language");
+        let audio = directory.0.join("song.mp3");
+        write_spotdl_style_audio(&audio);
+        // Unmistakably English lyrics, and a catalogue saying Korean.
+        fs::write(
+            directory.0.join("song.lrc"),
+            "[00:01.00]Every night I dream of you\n[00:05.00]and the morning comes again\n",
+        )
+        .unwrap();
+
+        let korean = parse_language("Korean").unwrap();
+        let report = finalize(&audio, None, Some(&korean), &english());
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.get("TLAN").and_then(|f| f.content().text()),
+            Some("Korean")
+        );
+        assert_eq!(report.languages_looked_up, 1);
+        // The detector never ran, so nothing was "detected".
+        assert_eq!(report.languages_detected, 0);
+        // The USLT frame carries the matching code.
+        assert_eq!(tag.lyrics().next().unwrap().lang, korean.code);
+    }
+
+    /// MusicBrainz work data is patchy, so a miss has to leave the old
+    /// behaviour intact rather than fall straight through to the default.
+    #[test]
+    fn without_a_known_language_the_lyrics_are_still_read() {
+        let directory = TempDir::new("detected-language");
+        let audio = directory.0.join("song.mp3");
+        write_spotdl_style_audio(&audio);
+        fs::write(
+            directory.0.join("song.lrc"),
+            "[00:01.00]오늘밤 달빛이 좀 좋네\n[00:05.00]너와 함께 걷는 이 밤\n",
+        )
+        .unwrap();
+
+        let report = finalize(&audio, None, None, &english());
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.get("TLAN").and_then(|f| f.content().text()),
+            Some("Korean")
+        );
+        assert_eq!(report.languages_detected, 1);
+        assert_eq!(report.languages_looked_up, 0);
+    }
+
+    /// And when neither knows, the configured default still stands.
+    #[test]
+    fn with_neither_the_default_is_recorded() {
+        let directory = TempDir::new("default-language");
+        let audio = directory.0.join("song.mp3");
+        write_spotdl_style_audio(&audio);
+
+        let report = finalize(&audio, None, None, &parse_language("Japanese").unwrap());
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.get("TLAN").and_then(|f| f.content().text()),
+            Some("Japanese")
+        );
+        assert_eq!(report.languages_detected, 0);
+        assert_eq!(report.languages_looked_up, 0);
     }
 }

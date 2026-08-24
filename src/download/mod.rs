@@ -9,7 +9,9 @@ use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
-use crate::sources::{Limits, itunes::Client as ItunesClient};
+use crate::sources::{
+    Limits, itunes::Client as ItunesClient, musicbrainz::Client as MusicBrainzClient,
+};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -102,6 +104,18 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         println!("Copyright will be looked up per album through the iTunes Search API.");
         Some(ItunesClient::new(Limits::default())?)
     };
+    let mut musicbrainz = if config.no_language_lookup {
+        println!("Language: taken from the lyrics; the MusicBrainz lookup is disabled.");
+        None
+    } else {
+        println!(
+            "Language will be looked up per track on MusicBrainz, falling back to the lyrics."
+        );
+        Some(MusicBrainzClient::new(
+            env::var("MUSICBRAINZ_CONTACT").ok().as_deref(),
+            Limits::default(),
+        )?)
+    };
     let total = input.entries.len();
     let mut completed = 0usize;
     let mut failures = Vec::new();
@@ -133,6 +147,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
                         entry,
                         &before,
                         itunes.as_mut(),
+                        musicbrainz.as_mut(),
                         &mut metadata_totals,
                     )
                 } else {
@@ -161,10 +176,12 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); stripped {} rating/encoder/year frame(s); wrote {} copyright message(s).",
+        "Metadata: updated {} file(s); stripped {} rating/encoder/year frame(s); wrote {} copyright message(s); {} language(s) came from MusicBrainz and {} from the lyrics.",
         metadata_totals.files_updated,
         metadata_totals.frames_stripped,
-        metadata_totals.copyrights_written
+        metadata_totals.copyrights_written,
+        metadata_totals.languages_looked_up,
+        metadata_totals.languages_detected
     );
     if metadata_totals.copyright_lookups_failed > 0 {
         println!(
@@ -237,6 +254,7 @@ fn apply_metadata(
     entry: &Entry,
     before: &MusicSnapshot,
     mut itunes: Option<&mut ItunesClient>,
+    mut musicbrainz: Option<&mut MusicBrainzClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
     let files = match downloaded_files(config, entry, before) {
@@ -272,9 +290,23 @@ fn apply_metadata(
             },
             None => None,
         };
+        // MusicBrainz records the language on the work -- the song as
+        // written -- which is what TLAN is about. It is patchy, so a miss
+        // simply leaves the lyrics to be read for a guess as before.
+        let language = match musicbrainz.as_deref_mut() {
+            Some(client) => match track_language(client, file) {
+                Ok(language) => language,
+                Err(error) => {
+                    eprintln!("Language: {error}");
+                    None
+                }
+            },
+            None => None,
+        };
         report.absorb(metadata::finalize(
             file,
             copyright.as_deref(),
+            language.as_ref(),
             &config.language,
         ));
         // The track ID is only there to tie a file back to the line that asked
@@ -362,6 +394,17 @@ fn downloaded_files(
         Some(track_id) => files::music_files_for_track(&config.output, track_id),
         None => Ok(Vec::new()),
     }
+}
+
+/// Look up one file's language on MusicBrainz, using the tag spotDL wrote.
+fn track_language(
+    client: &mut MusicBrainzClient,
+    audio: &Path,
+) -> Result<Option<crate::Language>, String> {
+    let Some(track) = metadata::evidence_of(audio) else {
+        return Ok(None);
+    };
+    client.language(&track).map_err(|error| error.to_string())
 }
 
 /// Look up one file's album on iTunes, using the tag spotDL wrote.
@@ -746,6 +789,7 @@ mod tests {
             non_interactive: false,
             auto_download_deno: false,
             no_copyright: false,
+            no_language_lookup: false,
             language: crate::lyrics::parse_language("English").unwrap(),
             max_attempts: 3,
             max_rate_limit_wait: 300,

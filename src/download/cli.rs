@@ -18,6 +18,8 @@ pub struct Config {
     pub auto_download_deno: bool,
     /// Skip the iTunes copyright lookup.
     pub no_copyright: bool,
+    /// Skip the MusicBrainz language lookup and read the lyrics instead.
+    pub no_language_lookup: bool,
     /// Recorded when the lyrics cannot settle the language.
     pub language: Language,
     pub max_attempts: u32,
@@ -45,6 +47,7 @@ where
     let mut non_interactive = false;
     let mut auto_download_deno = false;
     let mut no_copyright = false;
+    let mut no_language_lookup = false;
     let mut language = DEFAULT_LANGUAGE.to_owned();
     let mut max_attempts = 3;
     let mut max_rate_limit_wait = 300;
@@ -59,6 +62,7 @@ where
             "--non-interactive" => non_interactive = true,
             "--auto-download-deno" => auto_download_deno = true,
             "--no-copyright" => no_copyright = true,
+            "--no-language-lookup" => no_language_lookup = true,
             "--language" => language = next_value(&args, &mut index, argument)?,
             "-o" | "--output" => {
                 output = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
@@ -138,6 +142,7 @@ where
         non_interactive,
         auto_download_deno,
         no_copyright,
+        no_language_lookup,
         language,
         max_attempts,
         max_rate_limit_wait,
@@ -229,6 +234,8 @@ OPTIONS:
         --non-interactive             Never prompt for a token, Deno, or a replacement
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
         --no-copyright                Skip the iTunes copyright lookup entirely
+        --no-language-lookup          Skip the MusicBrainz language lookup and read the
+                                      lyrics instead
         --language <LANGUAGE>         Fallback language, by name or code [default: English]
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]

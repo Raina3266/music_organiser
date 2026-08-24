@@ -365,10 +365,31 @@ complete. The `℗` line is the label's and rarely differs between storefronts.
 
 #### Language
 
-Neither Spotify nor iTunes exposes a language for tracks, so `TLAN` cannot be
-looked up. The synced lyrics are the only evidence available, and the language
-is detected from their text, with the timestamps and any `[ar:...]` metadata
-stripped first so they cannot mislead the detector.
+`TLAN` is looked up on MusicBrainz, per track, and falls back to reading the
+lyrics when MusicBrainz has no answer.
+
+The language comes from the **work** — the song as written — reached through
+the recording, rather than from the release. That distinction matters: a
+release's own language field describes the text on its track list, so an
+English song on a Korean album would be labelled Korean. The work is where
+MusicBrainz records what the song is actually sung in.
+
+The recording is found by ISRC where the tag has one, which is exact, and by
+artist and title otherwise, ranked the same way releases are so that a search
+for a common title cannot return somebody else's song of that name.
+
+Work data is patchy — plenty of recordings have no work linked, and plenty of
+works have no language recorded — so a miss is ordinary and costs nothing: the
+synced lyrics are then detected from as before, with the timestamps and any
+`[ar:...]` metadata stripped first so they cannot mislead the detector. A
+catalogue that names the language is preferred over the detector, since it
+describes the song rather than guessing at whatever text the `.lrc` happens to
+hold.
+
+This costs two MusicBrainz requests per track, spaced at the published one per
+second. Against the time spent fetching and transcoding the audio that is not
+the bottleneck, but `--no-language-lookup` turns it off and returns to reading
+the lyrics alone. Set `MUSICBRAINZ_CONTACT` so MusicBrainz can reach you.
 
 `TLAN` is written as a readable **name** — `English`, `Chinese`, `Korean`,
 `Spanish` — because that is what a tagger displays. ID3v2.3 specifies an
@@ -376,8 +397,9 @@ ISO-639-2 code in this frame, so a strict reader will see a value it does not
 recognise; the three-byte language field inside the `USLT` frame, whose width
 the frame format fixes, still carries the code.
 
-- A confident detection sets `TLAN`, and the lyrics frame's own language field
-  is set to the matching code.
+- A language from MusicBrainz sets `TLAN`, and the lyrics frame's own language
+  field is set to the matching code.
+- Failing that, a confident detection from the lyrics does the same.
 - Too little text, or an unreliable guess, falls back to `--language`
   (default `English`) rather than recording something invented. Two or more
   non-blank lyric lines are required before a guess is even attempted.

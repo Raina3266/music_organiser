@@ -18,12 +18,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::AlbumEvidence;
 use crate::sources::{
     Limits,
     http::Http,
     naming::{Score, confidence, copyright_line, year_of},
 };
+use crate::{AlbumEvidence, Language, parse_language};
 use crate::{CopyrightLookup, LookupError};
 
 pub const LABEL: &str = "MusicBrainz";
@@ -31,6 +31,7 @@ pub const LABEL: &str = "MusicBrainz";
 pub const CONTACT_VARIABLE: &str = "MUSICBRAINZ_CONTACT";
 
 const SEARCH_URL: &str = "https://musicbrainz.org/ws/2/release";
+const RECORDING_URL: &str = "https://musicbrainz.org/ws/2/recording";
 /// One request a second is the published limit; the extra 100ms is slack for a
 /// clock that rounds the wrong way.
 const MIN_INTERVAL: Duration = Duration::from_millis(1_100);
@@ -84,13 +85,56 @@ struct Label {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RecordingSearch {
+    #[serde(default)]
+    recordings: Vec<RecordingStub>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordingStub {
+    id: String,
+    title: Option<String>,
+    #[serde(rename = "artist-credit", default)]
+    artist_credit: Vec<ArtistCredit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Recording {
+    #[serde(default)]
+    relations: Vec<WorkRelation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkRelation {
+    work: Option<Work>,
+}
+
+/// A work is the song as written, which is where MusicBrainz records the
+/// language it is sung in.
+#[derive(Debug, Deserialize)]
+struct Work {
+    /// The current spelling, a list because a song can be sung in more than
+    /// one.
+    #[serde(default)]
+    languages: Vec<String>,
+    /// The older singular field, still present on plenty of works.
+    language: Option<String>,
+}
+
 /// A blocking handle on the MusicBrainz web service.
 pub struct Client {
     http: Http,
     /// The release endpoint. Searches go to it and a release is read from
     /// under it; only the tests point it anywhere but MusicBrainz.
     releases: String,
+    /// The recording endpoint, used to reach a track's work and so its
+    /// language.
+    recordings: String,
     albums: HashMap<(String, String), Option<String>>,
+    /// One answer per track, since language is a property of the song rather
+    /// than of the release it sits on.
+    languages: HashMap<String, Option<Language>>,
 }
 
 impl Client {
@@ -110,7 +154,9 @@ impl Client {
                 .waiting_at_most(limits.max_wait)
                 .attempting_at_most(limits.max_attempts),
             releases: SEARCH_URL.to_owned(),
+            recordings: RECORDING_URL.to_owned(),
             albums: HashMap::new(),
+            languages: HashMap::new(),
         })
     }
 
@@ -119,8 +165,80 @@ impl Client {
         Self {
             http: Http::new(LABEL, "test", Duration::from_millis(1)).unwrap(),
             releases: releases.to_owned(),
+            recordings: releases.to_owned(),
             albums: HashMap::new(),
+            languages: HashMap::new(),
         }
+    }
+
+    /// The language one track is sung in, according to MusicBrainz.
+    ///
+    /// The answer comes from the *work* — the song as written — rather than
+    /// from the release, because a release's language describes the text on
+    /// its track list. An English song on a Korean album has a Korean track
+    /// list and English lyrics, and it is the lyrics that `TLAN` is about.
+    ///
+    /// `None` covers every ordinary gap: no recording found, no work linked to
+    /// it, no language recorded on the work. Work data is patchy, so a caller
+    /// should have something else to fall back on.
+    pub fn language(&mut self, track: &AlbumEvidence) -> Result<Option<Language>, LookupError> {
+        let Some(title) = track.track_title.as_deref() else {
+            return Ok(None);
+        };
+        let key = match &track.isrc {
+            Some(isrc) => format!("isrc:{isrc}"),
+            None => format!("{} - {title}", track.artist),
+        };
+        if let Some(cached) = self.languages.get(&key) {
+            return Ok(cached.clone());
+        }
+
+        let language = self.look_the_work_up(track, title)?;
+        self.languages.insert(key, language.clone());
+        Ok(language)
+    }
+
+    fn look_the_work_up(
+        &mut self,
+        track: &AlbumEvidence,
+        title: &str,
+    ) -> Result<Option<Language>, LookupError> {
+        // An ISRC names the recording outright; without one the artist and
+        // title have to do, ranked the same way releases are.
+        let query = match &track.isrc {
+            Some(isrc) => format!("isrc:{}", quote_for_lucene(isrc)),
+            None => format!(
+                "artist:{} AND recording:{}",
+                quote_for_lucene(&track.artist),
+                quote_for_lucene(title)
+            ),
+        };
+        let limit = RESULT_LIMIT.to_string();
+        let recordings = self.recordings.clone();
+        let Some(found): Option<RecordingSearch> = self.http.get_json(
+            &recordings,
+            &[
+                ("query", query.as_str()),
+                ("limit", limit.as_str()),
+                ("fmt", "json"),
+            ],
+            &[],
+        )?
+        else {
+            return Ok(None);
+        };
+
+        let Some(id) = best_recording(&found.recordings, track, title) else {
+            return Ok(None);
+        };
+        let url = format!("{recordings}/{id}");
+        let Some(recording): Option<Recording> =
+            self.http
+                .get_json(&url, &[("inc", "work-rels"), ("fmt", "json")], &[])?
+        else {
+            return Ok(None);
+        };
+        Ok(language_of_works(&recording))
     }
 
     fn lookup(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
@@ -249,6 +367,47 @@ fn copyright_of(release: &Release) -> Option<String> {
         }
     }
     None
+}
+
+/// The closest recording to what the tag says, or `None` when none match.
+///
+/// An ISRC search returns the right recording already, but the ranking costs
+/// nothing and guards the artist-and-title path, where a search for a common
+/// title can return anybody's song of that name.
+fn best_recording(
+    recordings: &[RecordingStub],
+    track: &AlbumEvidence,
+    title: &str,
+) -> Option<String> {
+    recordings
+        .iter()
+        .filter_map(|recording| {
+            let name = confidence(recording.title.as_deref(), title)?;
+            let artist = recording
+                .artist_credit
+                .iter()
+                .filter_map(|credit| confidence(credit.name.as_deref(), &track.artist))
+                .min()?;
+            Some(((name, artist), recording))
+        })
+        .min_by_key(|(rank, _)| *rank)
+        .map(|(_, recording)| recording.id.clone())
+}
+
+/// The language of the first work that records one.
+///
+/// A recording can link to several works, and a work can list several
+/// languages when a song is sung in more than one. `TLAN` holds a single
+/// language, so the first that parses is the one written; anything MusicBrainz
+/// spells with a code this program does not know is passed over rather than
+/// guessed at.
+fn language_of_works(recording: &Recording) -> Option<Language> {
+    recording
+        .relations
+        .iter()
+        .filter_map(|relation| relation.work.as_ref())
+        .flat_map(|work| work.languages.iter().chain(work.language.iter()))
+        .find_map(|code| parse_language(code))
 }
 
 /// Wrap a value as a Lucene phrase, dropping what would break the query.
@@ -505,5 +664,163 @@ mod tests {
         let asked = server.requests();
         assert_eq!(asked[1].target, "/original?inc=label-rels&fmt=json");
         assert_eq!(asked.len(), 2);
+    }
+
+    fn track(artist: &str, album: &str, title: &str) -> AlbumEvidence {
+        let mut evidence = wanting(artist, album);
+        evidence.track_title = Some(title.to_owned());
+        evidence
+    }
+
+    /// The language comes from the work -- the song as written -- reached
+    /// through the recording, because a release's own language describes the
+    /// text on its track list rather than what is sung.
+    #[test]
+    fn the_language_comes_from_the_works_of_the_recording() {
+        let server = Server::answering(&[
+            r#"{"recordings":[
+                {"id":"right","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"relations":[
+                {"work":{"languages":["kor"],"language":"kor"}}
+            ]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+
+        let language = client
+            .language(&track("Daft Punk", "Discovery", "One More Time"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(language.name, "Korean");
+        assert_eq!(language.code, "kor");
+        let asked: Vec<String> = server
+            .requests()
+            .into_iter()
+            .map(|request| request.target)
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                "/?query=artist%3A%22Daft+Punk%22+AND+recording%3A%22One+More+Time%22&limit=10&fmt=json",
+                "/right?inc=work-rels&fmt=json",
+            ]
+        );
+    }
+
+    /// An ISRC names the recording outright, so it replaces the fuzzy search
+    /// rather than adding to it.
+    #[test]
+    fn an_isrc_names_the_recording_outright() {
+        let server = Server::answering(&[
+            r#"{"recordings":[
+                {"id":"exact","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"relations":[{"work":{"languages":["eng"]}}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = track("Daft Punk", "Discovery", "One More Time");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        assert_eq!(client.language(&wanted).unwrap().unwrap().name, "English");
+        let asked = server.requests();
+        assert_eq!(
+            asked[0].target,
+            "/?query=isrc%3A%22GBUM71029604%22&limit=10&fmt=json"
+        );
+    }
+
+    /// Work data is patchy. Every ordinary gap has to come back as "no
+    /// answer", so the caller can fall back to reading the lyrics.
+    #[test]
+    fn every_gap_in_the_data_is_simply_no_answer() {
+        // No recording found.
+        let server = Server::answering(&[r#"{"recordings":[]}"#]);
+        let mut client = Client::pointing_at(&server.address);
+        assert_eq!(
+            client
+                .language(&track("Daft Punk", "Discovery", "One More Time"))
+                .unwrap(),
+            None
+        );
+        server.requests();
+
+        // A recording with no work linked to it, which is the common case.
+        let server = Server::answering(&[
+            r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
+            r#"{"relations":[]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        assert_eq!(
+            client
+                .language(&track("Daft Punk", "Discovery", "One More Time"))
+                .unwrap(),
+            None
+        );
+        server.requests();
+
+        // A work with no language recorded on it.
+        let server = Server::answering(&[
+            r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
+            r#"{"relations":[{"work":{}}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        assert_eq!(
+            client
+                .language(&track("Daft Punk", "Discovery", "One More Time"))
+                .unwrap(),
+            None
+        );
+        server.requests();
+    }
+
+    /// A tag with no title has nothing to search a recording by, and must not
+    /// spend a request finding that out.
+    #[test]
+    fn a_track_with_no_title_is_not_searched_for() {
+        let server = Server::answering(&[]);
+        let mut client = Client::pointing_at(&server.address);
+
+        assert_eq!(
+            client.language(&wanting("Daft Punk", "Discovery")).unwrap(),
+            None
+        );
+
+        assert!(server.requests().is_empty());
+    }
+
+    /// Language belongs to the song, so it is cached per track rather than per
+    /// album -- but asking twice for the same track still costs one lookup.
+    #[test]
+    fn a_track_is_only_looked_up_once() {
+        let server = Server::answering(&[
+            r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
+            r#"{"relations":[{"work":{"languages":["fra"]}}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let wanted = track("Daft Punk", "Discovery", "One More Time");
+
+        assert_eq!(client.language(&wanted).unwrap().unwrap().name, "French");
+        assert_eq!(client.language(&wanted).unwrap().unwrap().name, "French");
+
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    /// A search for a common title can return anybody's song of that name, so
+    /// the artist still has to agree.
+    #[test]
+    fn a_recording_by_the_wrong_artist_is_refused() {
+        let server = Server::answering(&[r#"{"recordings":[
+                {"id":"wrong","title":"One More Time","artist-credit":[{"name":"Britney Spears"}]}
+            ]}"#]);
+        let mut client = Client::pointing_at(&server.address);
+
+        assert_eq!(
+            client
+                .language(&track("Daft Punk", "Discovery", "One More Time"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(server.requests().len(), 1);
     }
 }
