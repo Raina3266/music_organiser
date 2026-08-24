@@ -3,6 +3,7 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
+use crate::sources::Source;
 
 pub const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -20,13 +21,13 @@ USAGE:
     " export <FOLDER> [OUTPUT_CSV] [--overwrite]
     ",
     env!("CARGO_PKG_NAME"),
-    " copyright <FOLDER> [--only-missing] [--dry-run]
+    " copyright <FOLDER> [--source NAME] [--only-missing] [--dry-run]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
     delete      Remove selected ID3 tags from a folder recursively
     export      Write every ID3 frame under a folder to one CSV file
-    copyright   Look the TCOP copyright message up again on iTunes
+    copyright   Look the TCOP copyright message up again in a music catalogue
 
 EXAMPLES:
     ",
@@ -40,7 +41,10 @@ EXAMPLES:
     " export \"/music\" frames.csv
     ",
     env!("CARGO_PKG_NAME"),
-    " copyright \"/music\" --dry-run
+    " copyright \"/music\"
+    ",
+    env!("CARGO_PKG_NAME"),
+    " copyright \"/music\" --source musicbrainz --only-missing
 
 The download command reads one link per line and forces MP3 with synced
 lyrics. A line is a Spotify URL, a YouTube Music URL, or a
@@ -63,11 +67,17 @@ file has no such frame. Without OUTPUT_CSV it writes id3-frames.csv inside
 the scanned folder, and it refuses to replace an existing file unless
 --overwrite is given.
 
-The copyright command looks every album under a folder up on the iTunes Search
-API and writes the message it finds to TCOP. A file is written only when a
-copyright was found: a lookup that matches nothing, a lookup that fails, and a
-file naming no album all leave that file exactly as it was. --only-missing
-skips files that already carry a message.
+The copyright command looks every album under a folder up in a music catalogue
+and writes the message it finds to TCOP. Four catalogues are available and they
+disagree on both wording and coverage, so an interactive run asks which one to
+use; --source itunes|musicbrainz|discogs|spotify answers the question in
+advance, and a run with no terminal uses iTunes. iTunes and MusicBrainz need no
+account; Discogs and Spotify need a token, taken from --token-file, from
+DISCOGS_TOKEN or SPOTIFY_ACCESS_TOKEN, or from a prompt.
+
+A file is written only when a copyright was found: a lookup that matches
+nothing, a lookup that fails, and a file naming no album all leave that file
+exactly as it was. --only-missing skips files that already carry a message.
 
 Run `",
     env!("CARGO_PKG_NAME"),
@@ -91,6 +101,13 @@ pub enum Command {
     },
     Copyright {
         folder: PathBuf,
+        /// The catalogue to ask. `None` means nobody has chosen yet, so an
+        /// interactive run asks and any other run takes the default.
+        source: Option<Source>,
+        /// A token given on the command line. Every process on the machine can
+        /// read this, so --token-file and the environment are preferred.
+        token: Option<String>,
+        token_file: Option<PathBuf>,
         only_missing: bool,
         dry_run: bool,
     },
@@ -197,30 +214,64 @@ fn parse_export(args: &[OsString]) -> Result<Command, String> {
 
 fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     let mut positional = Vec::new();
+    let mut source = None;
+    let mut token = None;
+    let mut token_file = None;
     let mut only_missing = false;
     let mut dry_run = false;
 
-    for argument in args {
-        if argument == "--only-missing" {
-            only_missing = true;
-        } else if argument == "--dry-run" {
-            dry_run = true;
-        } else if argument.to_string_lossy().starts_with('-') {
-            return Err(format!("unknown option {:?}", argument.to_string_lossy()));
-        } else {
-            positional.push(argument);
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy().into_owned();
+        match argument.as_str() {
+            "--only-missing" => only_missing = true,
+            "--dry-run" => dry_run = true,
+            "--source" => source = Some(Source::parse(&next_value(args, &mut index, "--source")?)?),
+            "--token" => token = Some(next_value(args, &mut index, "--token")?),
+            "--token-file" => {
+                token_file = Some(PathBuf::from(next_value(args, &mut index, "--token-file")?));
+            }
+            _ if argument.starts_with("--source=") => {
+                source = Some(Source::parse(&argument["--source=".len()..])?);
+            }
+            _ if argument.starts_with("--token=") => {
+                token = Some(argument["--token=".len()..].to_owned());
+            }
+            _ if argument.starts_with("--token-file=") => {
+                token_file = Some(PathBuf::from(&argument["--token-file=".len()..]));
+            }
+            _ if argument.starts_with('-') => {
+                return Err(format!("unknown option {argument:?}"));
+            }
+            _ => positional.push(&args[index]),
         }
+        index += 1;
     }
 
     if positional.len() != 1 {
         return Err("copyright requires exactly one folder".to_owned());
     }
+    if token.is_some() && token_file.is_some() {
+        return Err("give --token or --token-file, not both".to_owned());
+    }
 
     Ok(Command::Copyright {
         folder: PathBuf::from(positional[0]),
+        source,
+        token,
+        token_file,
         only_missing,
         dry_run,
     })
+}
+
+/// The value that follows an option, advancing past it.
+fn next_value(args: &[OsString], index: &mut usize, option: &str) -> Result<String, String> {
+    *index += 1;
+    args.get(*index)
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{option} expects a value"))
 }
 
 pub fn parse_tag_list(raw: &str) -> Result<Vec<TagSpec>, String> {
@@ -356,20 +407,82 @@ mod tests {
             .unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
+                source: None,
+                token: None,
+                token_file: None,
                 only_missing: true,
                 dry_run: true,
             }
         );
+        // No --source is not a default: it is the question left unanswered,
+        // which an interactive run then asks.
         assert_eq!(
             parse_args(strings(&["copyright", "/music"])).unwrap(),
             Command::Copyright {
                 folder: PathBuf::from("/music"),
+                source: None,
+                token: None,
+                token_file: None,
                 only_missing: false,
                 dry_run: false,
             }
         );
         assert!(parse_args(strings(&["copyright"])).is_err());
         assert!(parse_args(strings(&["copyright", "/music", "/other"])).is_err());
+    }
+
+    #[test]
+    fn parses_a_chosen_source_and_its_token() {
+        assert_eq!(
+            parse_args(strings(&[
+                "copyright",
+                "/music",
+                "--source",
+                "musicbrainz",
+                "--token-file",
+                "contact.txt",
+            ]))
+            .unwrap(),
+            Command::Copyright {
+                folder: PathBuf::from("/music"),
+                source: Some(Source::MusicBrainz),
+                token: None,
+                token_file: Some(PathBuf::from("contact.txt")),
+                only_missing: false,
+                dry_run: false,
+            }
+        );
+        // The --option=value spelling works too, and so do the short names.
+        assert_eq!(
+            parse_args(strings(&["copyright", "/music", "--source=discogs"])).unwrap(),
+            Command::Copyright {
+                folder: PathBuf::from("/music"),
+                source: Some(Source::Discogs),
+                token: None,
+                token_file: None,
+                only_missing: false,
+                dry_run: false,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_source_that_does_not_exist_or_a_token_given_twice() {
+        let error =
+            parse_args(strings(&["copyright", "/music", "--source", "bandcamp"])).unwrap_err();
+        assert!(error.contains("unknown copyright source"));
+        assert!(parse_args(strings(&["copyright", "/music", "--source"])).is_err());
+        assert!(
+            parse_args(strings(&[
+                "copyright",
+                "/music",
+                "--token",
+                "a",
+                "--token-file",
+                "b",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]

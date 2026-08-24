@@ -2,14 +2,14 @@ pub mod cli;
 mod input;
 mod output;
 mod spotdl;
-mod token;
+pub(crate) mod token;
 
 use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::{self, MusicSnapshot};
-use crate::itunes::Client as ItunesClient;
 use crate::metadata::{self, MetadataReport};
+use crate::sources::itunes::Client as ItunesClient;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};

@@ -8,7 +8,7 @@ a local music library. One executable provides four related workflows:
 | `download` | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
 | `delete` | Remove selected ID3 frames recursively |
 | `export` | Write every ID3 frame found recursively into one CSV file |
-| `copyright` | Look the `TCOP` copyright message up again for music already on disk |
+| `copyright` | Look the `TCOP` copyright message up again for music already on disk, in the catalogue of your choice |
 
 The Cargo package and executable are currently named `music-tag-transfer`.
 Downloaded audio comes from spotDL's configured providers, not from Spotify.
@@ -36,11 +36,11 @@ The individual workflows have these additional requirements:
 | Workflow | Additional requirements |
 |---|---|
 | `download` | spotDL 4.5.0 or newer and FFmpeg |
-| Copyright | Nothing; the iTunes Search API needs no account, key, or token |
+| Copyright | Nothing for iTunes or MusicBrainz; a personal access token for Discogs, an OAuth access token for Spotify |
 | Synced lyrics and language | Nothing extra; both are handled by this program |
 | Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
 | `delete` | Read/write access to the relevant music folder |
-| `copyright` | Read/write access to the music folder and internet access for the iTunes Search API |
+| `copyright` | Read/write access to the music folder, and internet access to the chosen catalogue |
 | `export` | Read access to the music folder and write access to the CSV destination |
 
 Check the external programs before downloading:
@@ -130,7 +130,7 @@ Search API, which is open to anyone.
 music-tag-transfer download [OPTIONS] <INPUT_FILE>
 music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
 music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
-music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
+music-tag-transfer copyright <FOLDER> [--source NAME] [--only-missing] [--dry-run]
 ```
 
 Global flags:
@@ -711,41 +711,112 @@ lookups were skipped with `--no-copyright`.
 ### Syntax
 
 ```text
-music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
+music-tag-transfer copyright <FOLDER> [--source NAME] [--token-file PATH] [--only-missing] [--dry-run]
 ```
 
 ```bash
 music-tag-transfer copyright "/path/to/music" --dry-run
 music-tag-transfer copyright "/path/to/music"
-music-tag-transfer copyright "/path/to/music" --only-missing
+music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
 ```
 
 | Flag | Effect |
 |---|---|
+| `--source NAME` | Which catalogue to ask: `itunes`, `musicbrainz`, `discogs`, or `spotify`. Omit it and an interactive run asks |
+| `--token-file PATH` | Read the chosen source's token, or MusicBrainz's contact address, from a file |
+| `--token VALUE` | The same, given inline. Every process on the machine can read a command line, so prefer `--token-file` or the environment |
 | `--only-missing` | Leave files that already carry a copyright message alone, and never look their album up |
 | `--dry-run` | Report the same counts without writing any file |
+
+### Choosing where the copyright comes from
+
+The four catalogues disagree, on wording and on coverage alike, so the source
+is a question the command asks rather than a setting buried in a config file.
+Run it without `--source` at a terminal and it offers the choice:
+
+```text
+Where should the copyright message come from?
+  1) iTunes       no account needed; the ℗ line as Apple's store publishes it
+  2) MusicBrainz  no account needed; built from the release's copyright and
+                  phonographic-copyright label relationships
+  3) Discogs      needs a personal access token; built from the release's
+                  Copyright (c) and Phonographic Copyright (p) credits
+  4) Spotify      needs an access token; the album's own copyright lines,
+                  taken as written
+
+Choose 1-4 or a name, Enter for iTunes:
+```
+
+Answer with the number or the name. `--source` answers it in advance, and a
+run with no terminal — a script, a cron job, a pipe — uses iTunes rather than
+stopping for an answer nobody is there to give.
+
+| Source | Account | Where the message comes from |
+|---|---|---|
+| `itunes` | None | The `copyright` field of the matching album in the iTunes Search API, as Apple publishes it |
+| `musicbrainz` | None | Assembled from the release's `phonographic copyright` label relationship, or its `copyright` one, plus the year that relationship began |
+| `discogs` | Personal access token | Assembled from the release's `Phonographic Copyright (p)` credit, or its `Copyright (c)` one, plus the release year |
+| `spotify` | OAuth access token | The album's own `copyrights` entry, `P` for preference and `C` otherwise, gaining the ℗ or © symbol only if Spotify left it off |
+
+Because two of the four assemble the line rather than quote it, the same album
+can come out worded differently depending on who was asked. Pick one source for
+a library and stay with it, or use `--only-missing` so an established message is
+never rewritten in another catalogue's style.
+
+### Tokens and contact addresses
+
+Discogs and Spotify will not answer without a token. Each is read from
+`--token`, then `--token-file`, then the environment, and only then by asking:
+
+| Source | Variable | Where to get one |
+|---|---|---|
+| `discogs` | `DISCOGS_TOKEN` | <https://www.discogs.com/settings/developers> → "Generate new token". A personal access token, not your password |
+| `spotify` | `SPOTIFY_ACCESS_TOKEN` | The same kind of token `download` asks for. One copied from the open.spotify.com web player works but expires within the hour |
+| `musicbrainz` | `MUSICBRAINZ_CONTACT` | Not a token: an email address or URL. MusicBrainz asks every application to identify itself so it can contact whoever runs one that misbehaves rather than blocking it |
+
+```bash
+export DISCOGS_TOKEN="..."
+music-tag-transfer copyright "/path/to/music" --source discogs
+```
+
+A run with no terminal and no token fails immediately, naming the variable to
+set, rather than scanning the whole library only to find it cannot ask anything.
 
 ### A file is only written when a copyright was found
 
 Nothing is ever cleared. A file is left exactly as it was when:
 
-- iTunes has no confident match for its album;
+- the chosen source has no confident match for its album;
 - the lookup fails, for instance with no network;
 - its tag names no album artist and album to search with;
 - it carries no ID3 tag at all;
 - the message found is the one it already has.
 
-Only an album that matches **both** the album artist and the album name in the
-tag is used, so a wrong copyright is never written. Misses and failures are
-printed as they happen and counted in the summary.
+Only a release that matches **both** the album artist and the album name in the
+tag is used, whichever source answered, so a wrong copyright is never written.
+The comparison ignores case and punctuation, allows an edition suffix such as
+`(Deluxe Edition)`, and allows the `(2)` Discogs appends to a disambiguated
+artist. Misses and failures are printed as they happen and counted in the
+summary, and the summary names the other sources, since an album missing from
+one catalogue is often complete in another.
 
 ### One request per album
 
 The album artist and album name in each tag are the search key, and the answer
 is remembered for the rest of the run, so a 12-track album costs one request
-rather than twelve. Requests are spaced 200 ms apart, and throttling responses
-are retried with a backoff that honours `Retry-After`. A library of 500 albums
-therefore takes roughly two minutes.
+rather than twelve. Throttling responses are retried with a backoff that honours
+`Retry-After`, and requests are spaced to stay inside each catalogue's published
+limit:
+
+| Source | Spacing | Requests per album |
+|---|---|---|
+| `itunes` | 200 ms | One |
+| `spotify` | 200 ms | Two: the search answers with a simplified album that carries no copyrights, so the match is fetched in full |
+| `musicbrainz` | 1.1 s, its published one-per-second limit | Up to four: the search, then up to three matching releases, since only some pressings carry the relationships |
+| `discogs` | 1.1 s, within its 60-per-minute limit | Up to four: a search result carries neither the credits nor a reliably split artist and title, so candidates have to be opened to be judged |
+
+A library of 500 albums therefore takes roughly two minutes on iTunes or
+Spotify, and up to half an hour on MusicBrainz or Discogs.
 
 Every changed file is written as ID3v2.3 through the same copy-edit-rename that
 the other commands use.
@@ -787,15 +858,30 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 
 ### No copyright was written
 
-Either iTunes had no album matching both the album artist and the album name in
-the tag, or the lookup failed and said so. Both are reported during the run,
+Either the source had no release matching both the album artist and the album
+name in the tag, or the lookup failed and said so. Both are reported during the run,
 and neither stops anything else in the tag from being written. Reissues and
 regional editions are the usual cause of a miss; `--no-copyright` turns the
 lookup off if you would rather not see it.
 
 Run `music-tag-transfer copyright <FOLDER>` later to try those albums again;
 files whose lookup missed or failed are left untouched, so nothing is lost by
-retrying.
+retrying. Coverage differs between the four catalogues, so trying another
+source is usually more productive than retrying the same one:
+
+```bash
+music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
+```
+
+`--only-missing` makes this safe to chain: each run only visits the files the
+previous ones could not fill in.
+
+### A token was rejected or has expired
+
+`Spotify rejected the token (HTTP 401)` and its Discogs equivalent mean the
+token itself, not the album. Spotify web-player tokens expire within the hour,
+so a long run can outlive one; fetch a fresh token and run again with
+`--only-missing` to pick up where it stopped.
 
 ### A download needs Deno
 
@@ -859,11 +945,11 @@ implements `CopyrightLookup` so a caller can supply its own source:
 
 ```rust
 use std::path::Path;
-use music_tag_transfer::{itunes, refresh_copyrights};
+use music_tag_transfer::{refresh_copyrights, sources::Source};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = itunes::Client::new()?;
-    let report = refresh_copyrights(Path::new("/path/to/music"), &mut client, false, true)?;
+    let mut lookup = Source::MusicBrainz.open(None)?;
+    let report = refresh_copyrights(Path::new("/path/to/music"), lookup.as_mut(), false, true)?;
     println!("Would write {} file(s)", report.files_updated);
     Ok(())
 }
@@ -912,7 +998,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `DeleteReport`, `ExportReport`, `ExportError`, `CopyrightReport`, `CopyrightError`,
 `MetadataReport`, `FileError`, and `TagSpec` are also exported,
 along with `album_of` for reading the album key a lookup searches with. The
-`cli`, `download`, `itunes`, and `metadata` modules expose the executable's
+`cli`, `download`, `sources`, and `metadata` modules expose the executable's
 command configuration and entry points.
 
 ## Development

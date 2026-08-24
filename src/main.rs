@@ -2,7 +2,8 @@ use std::{env, process::ExitCode};
 
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, download, export_frames_to_csv, itunes, refresh_copyrights,
+    delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights,
+    sources::{Source, menu},
 };
 
 fn main() -> ExitCode {
@@ -73,11 +74,26 @@ fn run() -> Result<ExitCode, String> {
         }
         Command::Copyright {
             folder,
+            source,
+            token,
+            token_file,
             only_missing,
             dry_run,
         } => {
-            let mut client = itunes::Client::new()?;
-            let report = refresh_copyrights(&folder, &mut client, only_missing, dry_run)
+            let interactive = menu::interactive();
+            // Nobody has chosen yet: ask if there is anyone to ask, and
+            // otherwise keep the default rather than stopping a scripted run.
+            let source = match source {
+                Some(source) => source,
+                None if interactive => menu::choose_source()?,
+                None => menu::DEFAULT,
+            };
+            let credential =
+                menu::credential_for(source, token.as_deref(), token_file.as_deref(), interactive)?;
+            let mut lookup = source.open(credential.as_deref())?;
+            println!("Looking copyrights up in {}.", source.title());
+
+            let report = refresh_copyrights(&folder, lookup.as_mut(), only_missing, dry_run)
                 .map_err(|error| error.to_string())?;
 
             let verb = if dry_run { "Would write" } else { "Wrote" };
@@ -95,8 +111,12 @@ fn run() -> Result<ExitCode, String> {
             );
             if report.albums_without_match > 0 || report.albums_failed > 0 {
                 println!(
-                    "{} album(s) had no iTunes match and {} lookup(s) failed; their files keep whatever they had.",
-                    report.albums_without_match, report.albums_failed
+                    "{} album(s) had no match on {} and {} lookup(s) failed; their files keep \
+                     whatever they had. Another source may know them: {}.",
+                    report.albums_without_match,
+                    source.title(),
+                    report.albums_failed,
+                    Source::names(),
                 );
             }
 

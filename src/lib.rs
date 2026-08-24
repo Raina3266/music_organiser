@@ -9,9 +9,9 @@ pub mod download;
 mod export;
 mod files;
 mod frames;
-pub mod itunes;
 mod lyrics;
 pub mod metadata;
+pub mod sources;
 
 pub use copyright::{CopyrightError, CopyrightLookup, CopyrightReport, refresh_copyrights};
 pub use delete::{DeleteReport, delete_tags_recursively};

@@ -3,7 +3,8 @@
 //! The download command fills `TCOP` from the iTunes Search API as each file
 //! arrives. This does the same for a folder that is already there: every album
 //! under it is looked up once and its files are given the copyright message
-//! that came back.
+//! that came back. Which catalogue answers is the caller's choice — see
+//! [`crate::sources`] — because the four disagree on both wording and coverage.
 //!
 //! A file is only ever written when a copyright was actually found. A lookup
 //! that matches nothing, a lookup that fails, and a file whose tag names no
@@ -16,26 +17,19 @@ use id3::{ErrorKind, Tag, TagLike};
 
 use crate::{
     files::{FileError, music_files_recursively, write_tag_safely},
-    itunes,
     metadata::{COPYRIGHT_FRAME, TAG_VERSION, album_key, set_text},
 };
 
-/// Where a copyright message can be looked up.
+/// One catalogue that can be asked for an album's copyright message.
 ///
-/// The iTunes client is the only real implementation; the trait keeps this
-/// module testable without reaching the network. Answers are remembered here
-/// rather than assumed of the implementation, so each album costs one call
-/// however many tracks it has.
+/// Every source in [`crate::sources`] implements this, and so does the fake in
+/// this module's tests, which is what keeps the refresh itself testable without
+/// reaching the network. Answers are remembered here rather than assumed of the
+/// implementation, so each album costs one call however many tracks it has.
 pub trait CopyrightLookup {
     /// The copyright message for an album, or `None` when nothing matched
     /// confidently enough to use.
     fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String>;
-}
-
-impl CopyrightLookup for itunes::Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, String> {
-        itunes::Client::copyright(self, artist, album)
-    }
 }
 
 /// What one refresh run did.
@@ -55,7 +49,7 @@ pub struct CopyrightReport {
     pub files_without_copyright: usize,
     /// Distinct albums a request was made for.
     pub albums_looked_up: usize,
-    /// Albums iTunes had no confident match for.
+    /// Albums the source had no confident match for.
     pub albums_without_match: usize,
     /// Albums whose lookup failed outright, which is a warning rather than a
     /// failure: their files keep whatever they had.
@@ -84,7 +78,7 @@ impl Error for CopyrightError {}
 /// counts without writing anything.
 pub fn refresh_copyrights(
     folder: &Path,
-    lookup: &mut impl CopyrightLookup,
+    lookup: &mut dyn CopyrightLookup,
     only_missing: bool,
     dry_run: bool,
 ) -> Result<CopyrightReport, CopyrightError> {
@@ -130,7 +124,7 @@ pub fn refresh_copyrights(
 
         let Some((artist, album)) = album_key(&tag) else {
             println!(
-                "{}: no album artist and album to search iTunes with; left unchanged.",
+                "{}: no album artist and album to search with; left unchanged.",
                 path.display()
             );
             report.files_without_copyright += 1;
@@ -149,7 +143,7 @@ pub fn refresh_copyrights(
             Ok(None) => {
                 if first_time {
                     report.albums_without_match += 1;
-                    println!("{artist} - {album}: iTunes has no matching album; left unchanged.");
+                    println!("{artist} - {album}: no matching release; left unchanged.");
                 }
                 report.files_without_copyright += 1;
                 continue;
