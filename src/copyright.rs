@@ -11,11 +11,18 @@
 //! album all leave the file exactly as it was — an existing message is never
 //! cleared by a miss.
 
-use std::{collections::HashMap, error::Error, fmt, path::Path};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt, fs,
+    io::{self, BufWriter, Write},
+    path::{Path, PathBuf},
+};
 
 use id3::{ErrorKind, Tag, TagLike};
 
 use crate::{
+    csv::{relative_label, write_record},
     files::{FileError, music_files_recursively, write_tag_safely},
     metadata::{COPYRIGHT_FRAME, TAG_VERSION, album_evidence, set_text},
 };
@@ -99,6 +106,114 @@ pub trait CopyrightLookup {
     /// The copyright message for an album, or `None` when nothing matched
     /// confidently enough to use.
     fn copyright(&mut self, album: &AlbumEvidence) -> Result<Option<String>, LookupError>;
+
+    /// Which catalogue supplied the last answer, for the report.
+    ///
+    /// Only a chain of sources has anything interesting to say here, so the
+    /// default is silence.
+    fn answered_by(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// What happened to one file.
+///
+/// Every visited file gets one of these, whether or not it changed, so the
+/// report can show what was left alone as well as what was written. A dry run
+/// producing these is the point of the exercise: it is the thing to read
+/// before letting the real run touch anything.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Outcome {
+    /// A copyright was found that differs from the one in the file.
+    Written,
+    /// The file already held exactly the message the lookup returned.
+    Unchanged,
+    /// Left alone: it already had a message and `only_missing` was set.
+    Skipped,
+    /// Every source was asked and none had a matching release.
+    NoMatch,
+    /// The lookup failed outright, so nothing could be written.
+    Failed,
+    /// The tag names no album artist and album to search with.
+    NoAlbum,
+    /// The file carries no ID3 tag at all.
+    NoTag,
+    /// The file could not be read, or its new tag could not be written.
+    Error,
+}
+
+impl Outcome {
+    /// The word this outcome appears as in the report.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Outcome::Written => "written",
+            Outcome::Unchanged => "unchanged",
+            Outcome::Skipped => "skipped",
+            Outcome::NoMatch => "no match",
+            Outcome::Failed => "lookup failed",
+            Outcome::NoAlbum => "no album in tag",
+            Outcome::NoTag => "no ID3 tag",
+            Outcome::Error => "error",
+        }
+    }
+}
+
+/// One file's before and after, for the report.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Change {
+    pub path: PathBuf,
+    /// The album artist and album the lookup searched with, when the tag named
+    /// them.
+    pub artist: String,
+    pub album: String,
+    /// The copyright the file carried before the run.
+    pub before: String,
+    /// The copyright the run wrote, or would have written on a dry run. Empty
+    /// whenever nothing was found, which is also what keeps the report honest
+    /// about a message being kept rather than replaced.
+    pub after: String,
+    pub outcome: Outcome,
+    /// Which catalogue supplied the message, when one did.
+    pub source: Option<&'static str>,
+    /// Why the file could not be handled, for the outcomes that have a reason.
+    pub note: String,
+}
+
+impl Change {
+    fn of(path: &Path, outcome: Outcome) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            artist: String::new(),
+            album: String::new(),
+            before: String::new(),
+            after: String::new(),
+            outcome,
+            source: None,
+            note: String::new(),
+        }
+    }
+
+    fn searching(mut self, artist: &str, album: &str) -> Self {
+        self.artist = artist.to_owned();
+        self.album = album.to_owned();
+        self
+    }
+
+    fn carrying(mut self, before: &str) -> Self {
+        self.before = before.to_owned();
+        self
+    }
+
+    fn writing(mut self, after: &str, source: Option<&'static str>) -> Self {
+        self.after = after.to_owned();
+        self.source = source;
+        self
+    }
+
+    fn because(mut self, note: &str) -> Self {
+        self.note = note.to_owned();
+        self
+    }
 }
 
 /// What one refresh run did.
@@ -128,6 +243,8 @@ pub struct CopyrightReport {
     pub stopped_early: bool,
     /// Files that could not be read or written, and why.
     pub errors: Vec<FileError>,
+    /// Every visited file's before and after, in the order they were scanned.
+    pub changes: Vec<Change>,
 }
 
 #[derive(Debug)]
@@ -173,9 +290,13 @@ pub fn refresh_copyrights(
             Ok(tag) => tag,
             Err(error) if matches!(error.kind, ErrorKind::NoTag) => {
                 report.files_without_copyright += 1;
+                report.changes.push(Change::of(&path, Outcome::NoTag));
                 continue;
             }
             Err(error) => {
+                report
+                    .changes
+                    .push(Change::of(&path, Outcome::Error).because(&error.to_string()));
                 report.errors.push(FileError {
                     path,
                     message: error.to_string(),
@@ -192,6 +313,9 @@ pub fn refresh_copyrights(
             .to_owned();
         if only_missing && !existing.is_empty() {
             report.files_skipped += 1;
+            report
+                .changes
+                .push(Change::of(&path, Outcome::Skipped).carrying(&existing));
             continue;
         }
 
@@ -201,6 +325,9 @@ pub fn refresh_copyrights(
                 path.display()
             );
             report.files_without_copyright += 1;
+            report
+                .changes
+                .push(Change::of(&path, Outcome::NoAlbum).carrying(&existing));
             continue;
         };
 
@@ -220,6 +347,11 @@ pub fn refresh_copyrights(
                     println!("{artist} - {album}: no matching release; left unchanged.");
                 }
                 report.files_without_copyright += 1;
+                report.changes.push(
+                    Change::of(&path, Outcome::NoMatch)
+                        .searching(&artist, &album)
+                        .carrying(&existing),
+                );
                 continue;
             }
             Err(LookupError::Album(error)) => {
@@ -228,6 +360,12 @@ pub fn refresh_copyrights(
                     eprintln!("{artist} - {album}: the lookup failed ({error}); left unchanged.");
                 }
                 report.files_without_copyright += 1;
+                report.changes.push(
+                    Change::of(&path, Outcome::Failed)
+                        .searching(&artist, &album)
+                        .carrying(&existing)
+                        .because(&error),
+                );
                 continue;
             }
             // Nothing left to ask. Stopping here keeps the remaining albums
@@ -243,14 +381,27 @@ pub fn refresh_copyrights(
         if first_time {
             println!("{artist} - {album}: {copyright}");
         }
+        let source = lookup.answered_by();
         if existing == copyright {
             report.files_unchanged += 1;
+            report.changes.push(
+                Change::of(&path, Outcome::Unchanged)
+                    .searching(&artist, &album)
+                    .carrying(&existing)
+                    .writing(&copyright, source),
+            );
             continue;
         }
 
         if !dry_run {
             set_text(&mut tag, COPYRIGHT_FRAME, Some(&copyright));
             if let Err(error) = write_tag_safely(&path, &tag, TAG_VERSION) {
+                report.changes.push(
+                    Change::of(&path, Outcome::Error)
+                        .searching(&artist, &album)
+                        .carrying(&existing)
+                        .because(&error.to_string()),
+                );
                 report.errors.push(FileError {
                     path,
                     message: error.to_string(),
@@ -259,9 +410,78 @@ pub fn refresh_copyrights(
             }
         }
         report.files_updated += 1;
+        report.changes.push(
+            Change::of(&path, Outcome::Written)
+                .searching(&artist, &album)
+                .carrying(&existing)
+                .writing(&copyright, source),
+        );
     }
 
     Ok(report)
+}
+
+/// The header of the copyright report, in the order the columns are written.
+const REPORT_COLUMNS: &[&str] = &[
+    "File",
+    "Album Artist",
+    "Album",
+    "Copyright Before",
+    "Copyright After",
+    "Outcome",
+    "Source",
+    "Note",
+];
+
+/// Write one row per visited file, showing what it held and what the run made
+/// of it.
+///
+/// Paired with `--dry-run` this is a preview: nothing on disk has changed, and
+/// the `Copyright After` column is what a real run would write. Without it the
+/// same file is a record of what was written.
+///
+/// The destination is only replaced when `overwrite` is set; otherwise an
+/// existing file is left alone and this fails.
+pub fn write_change_report(
+    report: &CopyrightReport,
+    root: &Path,
+    destination: &Path,
+    overwrite: bool,
+) -> Result<(), CopyrightError> {
+    if !overwrite && destination.exists() {
+        return Err(CopyrightError {
+            message: format!(
+                "{} already exists; pass --overwrite to replace it",
+                destination.display()
+            ),
+        });
+    }
+
+    write_rows(report, root, destination).map_err(|error| CopyrightError {
+        message: format!("cannot write {}: {error}", destination.display()),
+    })
+}
+
+fn write_rows(report: &CopyrightReport, root: &Path, destination: &Path) -> io::Result<()> {
+    let mut writer = BufWriter::new(fs::File::create(destination)?);
+    write_record(&mut writer, REPORT_COLUMNS.iter().copied())?;
+
+    for change in &report.changes {
+        let path = relative_label(&change.path, root);
+        let cells = [
+            path.as_str(),
+            change.artist.as_str(),
+            change.album.as_str(),
+            change.before.as_str(),
+            change.after.as_str(),
+            change.outcome.label(),
+            change.source.unwrap_or(""),
+            change.note.as_str(),
+        ];
+        write_record(&mut writer, cells.into_iter())?;
+    }
+
+    writer.flush()
 }
 
 #[cfg(test)]
@@ -534,5 +754,151 @@ mod tests {
         // times: that is the whole point, since asking again deepens a ban.
         assert_eq!(lookup.asked, 2);
         assert_eq!(report.albums_failed, 0);
+    }
+
+    fn report_of(directory: &Path) -> String {
+        let csv = directory.join("changes.csv");
+        let mut lookup = FakeLookup::with(&[
+            (
+                "Daft Punk",
+                "Discovery",
+                Ok(Some("\u{2117} 2001 Daft Life")),
+            ),
+            ("Daft Punk", "Obscure", Ok(None)),
+            ("Daft Punk", "Offline", Err("the network is down")),
+        ]);
+        let report = refresh_copyrights(directory, &mut lookup, false, true).unwrap();
+        write_change_report(&report, directory, &csv, false).unwrap();
+        fs::read_to_string(&csv).unwrap()
+    }
+
+    /// The point of the feature: a dry run says what it would do, per file,
+    /// without touching anything.
+    #[test]
+    fn the_report_shows_every_files_before_and_after() {
+        let directory = TestDirectory::new();
+        let changed = directory.0.join("changed.mp3");
+        let same = directory.0.join("same.mp3");
+        tagged_file(&changed, "Discovery", Some("stale message"));
+        tagged_file(&same, "Discovery", Some("\u{2117} 2001 Daft Life"));
+
+        let csv = report_of(&directory.0);
+        let rows: Vec<&str> = csv.split_terminator("\r\n").collect();
+
+        assert_eq!(
+            rows[0],
+            "File,Album Artist,Album,Copyright Before,Copyright After,Outcome,Source,Note"
+        );
+        let changed_row = rows.iter().find(|r| r.starts_with("changed.mp3")).unwrap();
+        assert!(changed_row.contains("stale message"), "{changed_row}");
+        assert!(
+            changed_row.contains("\u{2117} 2001 Daft Life"),
+            "{changed_row}"
+        );
+        assert!(changed_row.contains("written"), "{changed_row}");
+
+        let same_row = rows.iter().find(|r| r.starts_with("same.mp3")).unwrap();
+        assert!(same_row.contains("unchanged"), "{same_row}");
+
+        // A dry run wrote the report and nothing else.
+        assert_eq!(copyright_of(&changed).as_deref(), Some("stale message"));
+    }
+
+    /// A file that gets no copyright still gets a row, and its existing
+    /// message is shown as kept rather than blank.
+    #[test]
+    fn the_report_accounts_for_the_files_that_were_left_alone() {
+        let directory = TestDirectory::new();
+        tagged_file(
+            &directory.0.join("unmatched.mp3"),
+            "Obscure",
+            Some("keep me"),
+        );
+        tagged_file(
+            &directory.0.join("failed.mp3"),
+            "Offline",
+            Some("keep me too"),
+        );
+        fs::write(directory.0.join("untagged.mp3"), b"audio payload").unwrap();
+
+        let csv = report_of(&directory.0);
+
+        let row = |name: &str| {
+            csv.split_terminator("\r\n")
+                .find(|r| r.starts_with(name))
+                .unwrap_or_else(|| panic!("no row for {name}"))
+                .to_owned()
+        };
+        let unmatched = row("unmatched.mp3");
+        assert!(unmatched.contains("no match"), "{unmatched}");
+        assert!(unmatched.contains("keep me"), "{unmatched}");
+
+        let failed = row("failed.mp3");
+        assert!(failed.contains("lookup failed"), "{failed}");
+        assert!(failed.contains("the network is down"), "{failed}");
+
+        assert!(row("untagged.mp3").contains("no ID3 tag"));
+    }
+
+    #[test]
+    fn a_message_holding_a_comma_survives_the_round_trip() {
+        let directory = TestDirectory::new();
+        let path = directory.0.join("comma.mp3");
+        tagged_file(
+            &path,
+            "Discovery",
+            Some("\u{2117} 2020 Artist Partner Group, Inc."),
+        );
+
+        let csv = report_of(&directory.0);
+
+        // Quoted, so a spreadsheet still sees one cell.
+        assert!(
+            csv.contains("\"\u{2117} 2020 Artist Partner Group, Inc.\""),
+            "{csv}"
+        );
+    }
+
+    #[test]
+    fn the_report_refuses_to_replace_a_file_without_overwrite() {
+        let directory = TestDirectory::new();
+        tagged_file(&directory.0.join("song.mp3"), "Discovery", None);
+        let csv = directory.0.join("changes.csv");
+        fs::write(&csv, b"existing").unwrap();
+
+        let mut lookup = FakeLookup::default();
+        let report = refresh_copyrights(&directory.0, &mut lookup, false, true).unwrap();
+
+        let error = write_change_report(&report, &directory.0, &csv, false).unwrap_err();
+        assert!(error.to_string().contains("--overwrite"));
+        assert_eq!(fs::read_to_string(&csv).unwrap(), "existing");
+
+        write_change_report(&report, &directory.0, &csv, true).unwrap();
+        assert!(fs::read_to_string(&csv).unwrap().starts_with("File,"));
+    }
+
+    /// Skipped files are in the report too, so --only-missing shows what it
+    /// passed over rather than silently omitting it.
+    #[test]
+    fn the_report_lists_what_only_missing_skipped() {
+        let directory = TestDirectory::new();
+        tagged_file(
+            &directory.0.join("filled.mp3"),
+            "Discovery",
+            Some("already here"),
+        );
+
+        let mut lookup = FakeLookup::with(&[(
+            "Daft Punk",
+            "Discovery",
+            Ok(Some("\u{2117} 2001 Daft Life")),
+        )]);
+        let report = refresh_copyrights(&directory.0, &mut lookup, true, true).unwrap();
+
+        assert_eq!(report.changes.len(), 1);
+        assert_eq!(report.changes[0].outcome, Outcome::Skipped);
+        assert_eq!(report.changes[0].before, "already here");
+        // Nothing would be written, so nothing is promised in the after column.
+        assert!(report.changes[0].after.is_empty());
     }
 }

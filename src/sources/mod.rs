@@ -220,6 +220,8 @@ impl Source {
 /// asked of whoever is next.
 pub struct Chain {
     links: Vec<Link>,
+    /// The source that supplied the most recent answer, for the report.
+    answered_by: Option<&'static str>,
 }
 
 struct Link {
@@ -249,7 +251,10 @@ impl Chain {
                 hits: 0,
             });
         }
-        Ok(Self { links })
+        Ok(Self {
+            links,
+            answered_by: None,
+        })
     }
 
     /// What each source contributed, for the closing summary. Sources that
@@ -274,10 +279,12 @@ impl CopyrightLookup for Chain {
         // next one is asked. Only an outright failure is worth reporting, and
         // only if nobody after it succeeds.
         let mut failure = None;
+        self.answered_by = None;
         for link in self.links.iter_mut().filter(|link| link.answering) {
             match link.lookup.copyright(wanted) {
                 Ok(Some(copyright)) => {
                     link.hits += 1;
+                    self.answered_by = Some(link.source.title());
                     return Ok(Some(copyright));
                 }
                 Ok(None) => continue,
@@ -306,6 +313,10 @@ impl CopyrightLookup for Chain {
             Some(error) => Err(LookupError::Album(error)),
             None => Ok(None),
         }
+    }
+
+    fn answered_by(&self) -> Option<&'static str> {
+        self.answered_by
     }
 }
 
@@ -365,6 +376,7 @@ mod tests {
 
     fn chain_of(scripts: Vec<Vec<Result<Option<String>, LookupError>>>) -> Chain {
         Chain {
+            answered_by: None,
             links: scripts
                 .into_iter()
                 .zip(Source::ALL)

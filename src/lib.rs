@@ -4,6 +4,7 @@
 
 pub mod cli;
 mod copyright;
+mod csv;
 mod delete;
 pub mod download;
 mod export;
@@ -14,8 +15,8 @@ pub mod metadata;
 pub mod sources;
 
 pub use copyright::{
-    AlbumEvidence, CopyrightError, CopyrightLookup, CopyrightReport, LookupError,
-    refresh_copyrights,
+    AlbumEvidence, Change, CopyrightError, CopyrightLookup, CopyrightReport, LookupError, Outcome,
+    refresh_copyrights, write_change_report,
 };
 pub use delete::{DeleteReport, delete_tags_recursively};
 pub use export::{

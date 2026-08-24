@@ -4,6 +4,7 @@ use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
     delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights,
     sources::{Chain, Source, menu},
+    write_change_report,
 };
 
 fn main() -> ExitCode {
@@ -79,6 +80,8 @@ fn run() -> Result<ExitCode, String> {
             token_file,
             only_missing,
             dry_run,
+            csv,
+            overwrite,
             max_wait,
         } => {
             let interactive = menu::interactive();
@@ -171,6 +174,16 @@ fn run() -> Result<ExitCode, String> {
                             .map_or("itunes", |other| other.key()),
                     );
                 }
+            }
+
+            if let Some(csv) = &csv {
+                write_change_report(&report, &folder, csv, overwrite)
+                    .map_err(|error| error.to_string())?;
+                println!(
+                    "Wrote a before-and-after row for {} file(s) to {}.",
+                    report.changes.len(),
+                    csv.display()
+                );
             }
 
             if report.errors.is_empty() {

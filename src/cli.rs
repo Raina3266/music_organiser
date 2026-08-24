@@ -45,6 +45,9 @@ EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
     " copyright \"/music\" --source musicbrainz --only-missing
+    ",
+    env!("CARGO_PKG_NAME"),
+    " copyright \"/music\" --dry-run --csv changes.csv
 
 The download command reads one link per line and forces MP3 with synced
 lyrics. A line is a Spotify URL, a YouTube Music URL, or a
@@ -87,6 +90,11 @@ A file is written only when a copyright was found: a lookup that matches
 nothing, a lookup that fails, and a file naming no album all leave that file
 exactly as it was. --only-missing skips files that already carry a message.
 
+--csv PATH writes one row per file showing what it held, what the run would
+write, and what became of it. With --dry-run that is a preview to read before
+letting a real run touch anything; without it, a record of what was written.
+It refuses to replace an existing file unless --overwrite is given.
+
 Run `",
     env!("CARGO_PKG_NAME"),
     " download --help` for command-specific help.
@@ -120,6 +128,10 @@ pub enum Command {
         token_file: Option<PathBuf>,
         only_missing: bool,
         dry_run: bool,
+        /// Where to write the before-and-after report, when one was asked for.
+        csv: Option<PathBuf>,
+        /// Whether that report may replace an existing file.
+        overwrite: bool,
         /// Longest rate-limit wait to sit through before giving up on a
         /// source, in seconds.
         max_wait: u64,
@@ -232,6 +244,8 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     let mut token_file = None;
     let mut only_missing = false;
     let mut dry_run = false;
+    let mut csv = None;
+    let mut overwrite = false;
     let mut max_wait = DEFAULT_MAX_WAIT;
 
     let mut index = 0;
@@ -240,6 +254,8 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
         match argument.as_str() {
             "--only-missing" => only_missing = true,
             "--dry-run" => dry_run = true,
+            "--overwrite" => overwrite = true,
+            "--csv" => csv = Some(PathBuf::from(next_value(args, &mut index, "--csv")?)),
             "--source" => {
                 sources = Some(Source::parse_list(&next_value(
                     args, &mut index, "--source",
@@ -253,6 +269,9 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
             "--token" => token = Some(next_value(args, &mut index, "--token")?),
             "--token-file" => {
                 token_file = Some(PathBuf::from(next_value(args, &mut index, "--token-file")?));
+            }
+            _ if argument.starts_with("--csv=") => {
+                csv = Some(PathBuf::from(&argument["--csv=".len()..]));
             }
             _ if argument.starts_with("--source=") => {
                 sources = Some(Source::parse_list(&argument["--source=".len()..])?);
@@ -277,6 +296,9 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     if token.is_some() && token_file.is_some() {
         return Err("give --token or --token-file, not both".to_owned());
     }
+    if overwrite && csv.is_none() {
+        return Err("--overwrite only means something with --csv".to_owned());
+    }
 
     Ok(Command::Copyright {
         folder: PathBuf::from(positional[0]),
@@ -285,6 +307,8 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
         token_file,
         only_missing,
         dry_run,
+        csv,
+        overwrite,
         max_wait,
     })
 }
@@ -436,6 +460,8 @@ mod tests {
                 token_file: None,
                 only_missing: true,
                 dry_run: true,
+                csv: None,
+                overwrite: false,
                 max_wait: DEFAULT_MAX_WAIT,
             }
         );
@@ -450,6 +476,8 @@ mod tests {
                 token_file: None,
                 only_missing: false,
                 dry_run: false,
+                csv: None,
+                overwrite: false,
                 max_wait: DEFAULT_MAX_WAIT,
             }
         );
@@ -476,6 +504,8 @@ mod tests {
                 token_file: Some(PathBuf::from("contact.txt")),
                 only_missing: false,
                 dry_run: false,
+                csv: None,
+                overwrite: false,
                 max_wait: DEFAULT_MAX_WAIT,
             }
         );
@@ -489,9 +519,52 @@ mod tests {
                 token_file: None,
                 only_missing: false,
                 dry_run: false,
+                csv: None,
+                overwrite: false,
                 max_wait: DEFAULT_MAX_WAIT,
             }
         );
+    }
+
+    #[test]
+    fn parses_the_change_report_options() {
+        let Command::Copyright {
+            csv,
+            overwrite,
+            dry_run,
+            ..
+        } = parse_args(strings(&[
+            "copyright",
+            "/music",
+            "--dry-run",
+            "--csv",
+            "changes.csv",
+            "--overwrite",
+        ]))
+        .unwrap()
+        else {
+            panic!("expected the copyright command");
+        };
+        assert_eq!(csv, Some(PathBuf::from("changes.csv")));
+        assert!(overwrite);
+        assert!(dry_run);
+
+        // The --option=value spelling works here too.
+        let Command::Copyright { csv, .. } =
+            parse_args(strings(&["copyright", "/music", "--csv=out.csv"])).unwrap()
+        else {
+            panic!("expected the copyright command");
+        };
+        assert_eq!(csv, Some(PathBuf::from("out.csv")));
+    }
+
+    #[test]
+    fn rejects_a_report_option_that_would_do_nothing() {
+        // --overwrite with no report to write is a typo worth catching rather
+        // than a no-op worth ignoring.
+        let error = parse_args(strings(&["copyright", "/music", "--overwrite"])).unwrap_err();
+        assert!(error.contains("--overwrite only means something with --csv"));
+        assert!(parse_args(strings(&["copyright", "/music", "--csv"])).is_err());
     }
 
     #[test]

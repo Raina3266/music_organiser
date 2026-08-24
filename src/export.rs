@@ -18,6 +18,7 @@ use std::{
 use id3::{ErrorKind, Tag, frame::Content};
 
 use crate::{
+    csv::{relative_label, write_record},
     files::{FileError, music_files_recursively},
     frames::SUPPORTED_TAGS,
 };
@@ -29,9 +30,6 @@ const PATH_COLUMN: &str = "File";
 /// Joins the values of repeated frames that share one frame ID, such as the
 /// several `TXXX` or `APIC` frames a tagger may write.
 const VALUE_SEPARATOR: &str = " | ";
-/// The record separator RFC 4180 asks for. Newlines inside a value -- lyrics,
-/// mostly -- stay as line feeds inside the quoted cell.
-const RECORD_SEPARATOR: &str = "\r\n";
 
 /// What one export run found.
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -175,35 +173,6 @@ fn write_csv(
     writer.flush()
 }
 
-fn write_record<'a>(
-    writer: &mut impl Write,
-    cells: impl Iterator<Item = &'a str>,
-) -> io::Result<()> {
-    for (index, cell) in cells.enumerate() {
-        if index > 0 {
-            writer.write_all(b",")?;
-        }
-        writer.write_all(escape(cell).as_bytes())?;
-    }
-    writer.write_all(RECORD_SEPARATOR.as_bytes())
-}
-
-/// Quote a cell the way RFC 4180 asks, collapsing carriage returns so that
-/// only the record separator carries one.
-fn escape(value: &str) -> String {
-    let value = if value.contains('\r') {
-        value.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        value.to_owned()
-    };
-
-    if value.contains([',', '"', '\n']) {
-        format!("\"{}\"", value.replace('"', "\"\""))
-    } else {
-        value
-    }
-}
-
 /// `Title (TIT2)` for a frame this program knows a name for, the bare frame ID
 /// for anything else a tagger left behind.
 fn column_header(frame_id: &str) -> String {
@@ -214,13 +183,6 @@ fn column_header(frame_id: &str) -> String {
             || frame_id.to_owned(),
             |tag| format!("{} ({frame_id})", tag.name),
         )
-}
-
-fn relative_label(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
 }
 
 /// One frame as a single CSV cell.
@@ -284,6 +246,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::csv::RECORD_SEPARATOR;
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 

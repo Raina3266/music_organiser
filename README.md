@@ -728,6 +728,8 @@ music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missin
 | `--token VALUE` | The same, given inline. Every process on the machine can read a command line, so prefer `--token-file` or the environment |
 | `--only-missing` | Leave files that already carry a copyright message alone, and never look their album up |
 | `--dry-run` | Report the same counts without writing any file |
+| `--csv PATH` | Write a before-and-after row for every file visited |
+| `--overwrite` | Let `--csv` replace an existing report |
 
 ### Choosing where the copyright comes from
 
@@ -827,6 +829,38 @@ music-tag-transfer copyright "/path/to/music" --source discogs
 
 A run with no terminal and no token fails immediately, naming the variable to
 set, rather than scanning the whole library only to find it cannot ask anything.
+
+### Seeing what a run would do, before it does it
+
+`--dry-run` prints counts, which tells you how much would change but not
+*what*. Pair it with `--csv` and you get the detail, one row per file:
+
+```bash
+music-tag-transfer copyright "/path/to/music" --dry-run --csv changes.csv
+```
+
+| Column | What it holds |
+|---|---|
+| `File` | The path, relative to the folder scanned |
+| `Album Artist`, `Album` | What the lookup searched with |
+| `Copyright Before` | The message the file carries now |
+| `Copyright After` | What would be written, or empty when nothing was found |
+| `Outcome` | `written`, `unchanged`, `skipped`, `no match`, `lookup failed`, `no album in tag`, `no ID3 tag`, or `error` |
+| `Source` | Which catalogue supplied the message |
+| `Note` | Why, for the outcomes that have a reason |
+
+Every visited file gets a row, including the ones nothing happened to — a
+`no match` row still shows the message it kept, so the report is a complete
+account rather than a list of changes. `Copyright After` is left empty
+whenever nothing would be written, which is what makes a kept message
+obvious at a glance.
+
+The same flag works without `--dry-run`, where the file becomes a record of
+what was written rather than a preview. It refuses to replace an existing
+report unless `--overwrite` is given, the same rule `export` follows.
+
+With a fallback chain the `Source` column is worth reading on its own: it
+shows which catalogue actually answered for each album.
 
 ### A file is only written when a copyright was found
 
