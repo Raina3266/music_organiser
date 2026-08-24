@@ -17,7 +17,7 @@ use id3::{ErrorKind, Tag, TagLike};
 
 use crate::{
     files::{FileError, music_files_recursively, write_tag_safely},
-    metadata::{COPYRIGHT_FRAME, TAG_VERSION, album_key, set_text},
+    metadata::{COPYRIGHT_FRAME, TAG_VERSION, album_evidence, set_text},
 };
 
 /// Why a lookup did not produce a copyright.
@@ -49,6 +49,46 @@ impl fmt::Display for LookupError {
 
 impl Error for LookupError {}
 
+/// Everything a tag knows about the release its file belongs to.
+///
+/// The artist and album name alone are a weak key: names collide, catalogues
+/// spell them differently, and an album and its deluxe edition differ by a
+/// suffix. The rest of this is corroboration, taken from the first file seen
+/// for an album and reused for the others — so a lookup still costs one
+/// request per album, but has far more than a pair of strings to choose with.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct AlbumEvidence {
+    /// The album artist, or the track artist when there is no album artist.
+    pub artist: String,
+    pub album: String,
+    /// From `TSRC`. A globally unique identifier for the *recording*, which
+    /// pins it exactly on the sources that can search by it.
+    ///
+    /// It does not pin the release: one recording sits on the album, the
+    /// single, and any number of compilations, each with its own copyright
+    /// line. So this narrows the field to releases that genuinely contain the
+    /// track, and the album name still chooses between them.
+    pub isrc: Option<String>,
+    /// The release year, from `TDRC`.
+    pub year: Option<String>,
+    /// How many tracks the album has, from the total in `TRCK`'s `5/12`.
+    pub total_tracks: Option<u32>,
+    /// One track known to be on the release, from `TIT2`.
+    pub track_title: Option<String>,
+}
+
+impl AlbumEvidence {
+    /// The cache key: one lookup per album, however many tracks it has.
+    pub fn key(&self) -> (String, String) {
+        (self.artist.clone(), self.album.clone())
+    }
+
+    /// Whether there is enough to search with at all.
+    pub fn is_searchable(&self) -> bool {
+        !self.artist.trim().is_empty() && !self.album.trim().is_empty()
+    }
+}
+
 /// One catalogue that can be asked for an album's copyright message.
 ///
 /// Every source in [`crate::sources`] implements this, and so does the fake in
@@ -58,7 +98,7 @@ impl Error for LookupError {}
 pub trait CopyrightLookup {
     /// The copyright message for an album, or `None` when nothing matched
     /// confidently enough to use.
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError>;
+    fn copyright(&mut self, album: &AlbumEvidence) -> Result<Option<String>, LookupError>;
 }
 
 /// What one refresh run did.
@@ -155,7 +195,7 @@ pub fn refresh_copyrights(
             continue;
         }
 
-        let Some((artist, album)) = album_key(&tag) else {
+        let Some(wanted) = album_evidence(&tag) else {
             println!(
                 "{}: no album artist and album to search with; left unchanged.",
                 path.display()
@@ -164,11 +204,12 @@ pub fn refresh_copyrights(
             continue;
         };
 
-        let key = (artist.clone(), album.clone());
+        let (artist, album) = (wanted.artist.clone(), wanted.album.clone());
+        let key = wanted.key();
         let first_time = !answers.contains_key(&key);
         if first_time {
             report.albums_looked_up += 1;
-            let answer = lookup.copyright(&artist, &album);
+            let answer = lookup.copyright(&wanted);
             answers.insert(key.clone(), answer);
         }
         let copyright = match answers[&key].clone() {
@@ -294,12 +335,9 @@ mod tests {
     }
 
     impl CopyrightLookup for FakeLookup {
-        fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-            self.requests.push((artist.to_owned(), album.to_owned()));
-            self.answers
-                .get(&(artist.to_owned(), album.to_owned()))
-                .cloned()
-                .unwrap_or(Ok(None))
+        fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+            self.requests.push(wanted.key());
+            self.answers.get(&wanted.key()).cloned().unwrap_or(Ok(None))
         }
     }
 
@@ -477,9 +515,9 @@ mod tests {
             asked: usize,
         }
         impl CopyrightLookup for Spent {
-            fn copyright(&mut self, _: &str, album: &str) -> Result<Option<String>, LookupError> {
+            fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
                 self.asked += 1;
-                match album {
+                match wanted.album.as_str() {
                     "Discovery" => Ok(Some("\u{2117} 2001 Daft Life".to_owned())),
                     _ => Err(LookupError::Exhausted("rate limited for 5h 21m".to_owned())),
                 }

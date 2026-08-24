@@ -861,6 +861,45 @@ Where several candidates match, the closest wins rather than the first listed,
 so a search for `Discovery` prefers the plain release over a deluxe edition
 that happened to come back ahead of it.
 
+### The rest of the tag is evidence too
+
+A name is a weak key on its own, so the lookup uses everything else the tag
+knows about the release:
+
+| Frame | What it settles | Used by |
+|---|---|---|
+| `TSRC` | The ISRC, a globally unique identifier for the **recording** | Spotify and MusicBrainz search by it directly |
+| `TRCK` | The album's track total, from the `12` in `5/12` | all four, to rank candidates |
+| `TDRC` | The release year | all four, to rank candidates |
+
+The ISRC is the strong one: where a source can search by it, the release is
+found by identity instead of by name, and a whole class of error — the wrong
+artist's album entirely — becomes impossible. It identifies a *recording*
+rather than a release, though, since the same recording sits on the album, the
+single and any number of compilations, so the album name still chooses between
+the releases it turns up. A malformed ISRC is ignored rather than searched
+with, and an ISRC that finds nothing falls back to the name.
+
+spotDL fills `TSRC` **only when it used the official Spotify API**, so a
+library downloaded token-free has none. Check yours with `export` and look at
+the `ISRC (TSRC)` column.
+
+The track count is the underrated one, and needs no account at all:
+`Discovery` has fourteen tracks and `Discovery (Deluxe Edition)` has twenty,
+which separates them far more reliably than any comparison of their names.
+
+This evidence **ranks** candidates; it does not veto them. Agreement beats
+missing evidence, which beats conflict, so a release whose year and track count
+both match wins — but the only candidate there is still supplies its copyright
+even when the year disagrees, because catalogues genuinely disagree about
+release dates. The one exception is Discogs, which opens candidates in the
+order its search returned them and so cannot reorder them; there a
+contradicting track count skips the release and moves to the next.
+
+None of it costs an extra request. The evidence is taken from the first file
+seen for an album and reused for the rest, so a lookup is still one search per
+album however many tracks it has.
+
 Misses and failures are printed as they happen and counted in the summary, and
 the summary names the other sources, since an album missing from one catalogue
 is often complete in another.

@@ -24,6 +24,7 @@ use id3::{
     frame::{Content, Lyrics},
 };
 
+use crate::AlbumEvidence;
 use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
 use crate::lyrics::{LYRICS_DESCRIPTION, Language, detect_language, lyric_lines};
 
@@ -42,6 +43,8 @@ pub(crate) const TAG_VERSION: Version = Version::Id3v23;
 const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE", "TYER"];
 /// The copyright message frame.
 pub(crate) const COPYRIGHT_FRAME: &str = "TCOP";
+/// The ISRC frame, which spotDL fills only when it used the official API.
+const ISRC_FRAME: &str = "TSRC";
 /// The language frame. ID3v2.3 specifies an ISO-639-2 code here, but the
 /// readable name is what a tagger shows, so that is what is written.
 const LANGUAGE_FRAME: &str = "TLAN";
@@ -217,11 +220,72 @@ pub fn album_of(audio: &Path) -> Option<(String, String)> {
     album_key(&Tag::read_from_path(audio).ok()?)
 }
 
+/// Everything a file's tag knows about the release it belongs to.
+///
+/// Read from disk after spotDL has written the tag, so a download that used
+/// the official API has an ISRC here to look the recording up by exactly.
+pub fn evidence_of(audio: &Path) -> Option<AlbumEvidence> {
+    album_evidence(&Tag::read_from_path(audio).ok()?)
+}
+
 /// The same key read from a tag already in hand.
 pub(crate) fn album_key(tag: &Tag) -> Option<(String, String)> {
     let artist = tag.album_artist().or_else(|| tag.artist())?.trim();
     let album = tag.album()?.trim();
     (!artist.is_empty() && !album.is_empty()).then(|| (artist.to_owned(), album.to_owned()))
+}
+
+/// Everything in a tag that helps identify which release a file belongs to.
+///
+/// `None` when there is not even an artist and album to search with. The rest
+/// is best-effort: a missing ISRC, year, or track count weakens the match
+/// rather than preventing it.
+pub(crate) fn album_evidence(tag: &Tag) -> Option<AlbumEvidence> {
+    let (artist, album) = album_key(tag)?;
+    Some(AlbumEvidence {
+        artist,
+        album,
+        isrc: text(tag, ISRC_FRAME).filter(|isrc| is_an_isrc(isrc)),
+        year: recorded_year(tag),
+        // The total in "5/12", not the track's own number.
+        total_tracks: tag.total_tracks(),
+        track_title: tag
+            .title()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
+    })
+}
+
+fn text(tag: &Tag, frame_id: &str) -> Option<String> {
+    let value = tag.get(frame_id)?.content().text()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// The recording year, preferring the complete `TDRC` date.
+fn recorded_year(tag: &Tag) -> Option<String> {
+    if let Some(recorded) = tag.date_recorded() {
+        return Some(recorded.year.to_string());
+    }
+    // A tag written before TYER was dropped, or by something else entirely.
+    tag.year().map(|year| year.to_string())
+}
+
+/// Whether a value looks like an ISRC: two letters, three alphanumerics, and
+/// seven digits, conventionally written without separators.
+///
+/// Checked because a wrong ISRC is worse than none — it would search
+/// confidently for the wrong recording — and because taggers do leave
+/// placeholder text in the frame.
+fn is_an_isrc(value: &str) -> bool {
+    let compact: String = value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect();
+    compact.len() == 12
+        && compact[..2].chars().all(|c| c.is_ascii_alphabetic())
+        && compact[2..5].chars().all(|c| c.is_ascii_alphanumeric())
+        && compact[5..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Replace a text frame, leaving it untouched when there is no value to store.
@@ -563,5 +627,73 @@ mod tests {
             tag.get(LANGUAGE_FRAME).and_then(|f| f.content().text()),
             Some("Japanese")
         );
+    }
+
+    #[test]
+    fn accepts_only_something_shaped_like_an_isrc() {
+        // Two letters, three alphanumerics, seven digits.
+        assert!(is_an_isrc("GBUM71029604"));
+        assert!(is_an_isrc("US-RC1-72-00023"), "separators are conventional");
+        assert!(!is_an_isrc(""));
+        assert!(!is_an_isrc("unknown"));
+        // A wrong ISRC is worse than none: it searches confidently for the
+        // wrong recording, so anything malformed is refused.
+        assert!(!is_an_isrc("GBUM7102960"), "too short");
+        assert!(!is_an_isrc("GBUM710296045"), "too long");
+        assert!(!is_an_isrc("1BUM71029604"), "country must be letters");
+        assert!(!is_an_isrc("GBUM7102960X"), "the tail must be digits");
+    }
+
+    #[test]
+    fn reads_every_scrap_of_evidence_the_tag_carries() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_album_artist("Daft Punk");
+        tag.set_album("Discovery");
+        tag.set_title("One More Time");
+        tag.set_total_tracks(14);
+        tag.set_track(1);
+        tag.add_frame(Frame::text("TSRC", "GBUM71029604"));
+        tag.set_date_recorded(id3::Timestamp {
+            year: 2001,
+            month: Some(3),
+            day: Some(12),
+            hour: None,
+            minute: None,
+            second: None,
+        });
+
+        let evidence = album_evidence(&tag).unwrap();
+
+        assert_eq!(evidence.artist, "Daft Punk");
+        assert_eq!(evidence.album, "Discovery");
+        assert_eq!(evidence.isrc.as_deref(), Some("GBUM71029604"));
+        assert_eq!(evidence.year.as_deref(), Some("2001"));
+        // The total from "1/14", not the track's own number.
+        assert_eq!(evidence.total_tracks, Some(14));
+        assert_eq!(evidence.track_title.as_deref(), Some("One More Time"));
+    }
+
+    /// Most files carry far less than that, and must still be searchable.
+    #[test]
+    fn a_tag_with_only_an_artist_and_album_is_still_searchable() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_album_artist("Daft Punk");
+        tag.set_album("Discovery");
+        tag.add_frame(Frame::text("TSRC", "not an isrc"));
+
+        let evidence = album_evidence(&tag).unwrap();
+
+        assert!(evidence.is_searchable());
+        // Junk in the ISRC frame is dropped rather than searched with.
+        assert_eq!(evidence.isrc, None);
+        assert_eq!(evidence.year, None);
+        assert_eq!(evidence.total_tracks, None);
+    }
+
+    #[test]
+    fn a_tag_naming_no_album_yields_no_evidence() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_album_artist("Daft Punk");
+        assert!(album_evidence(&tag).is_none());
     }
 }

@@ -12,9 +12,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::AlbumEvidence;
 use crate::sources::{
     http::Http,
-    naming::{Confidence, confidence},
+    naming::{Score, confidence},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -42,6 +43,11 @@ struct AlbumResult {
     #[serde(rename = "collectionName")]
     collection_name: Option<String>,
     copyright: Option<String>,
+    /// Corroboration: how many tracks the store lists, and when it came out.
+    #[serde(rename = "trackCount")]
+    track_count: Option<u32>,
+    #[serde(rename = "releaseDate")]
+    release_date: Option<String>,
 }
 
 /// A blocking handle on the iTunes Search API.
@@ -66,16 +72,18 @@ impl Client {
     ///
     /// A wrong copyright is worse than none, so a result is used only when both
     /// its artist and its album name match what was asked for.
-    pub fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        if artist.trim().is_empty() || album.trim().is_empty() {
+    pub fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        if !wanted.is_searchable() {
             return Ok(None);
         }
-        let key = (artist.to_owned(), album.to_owned());
+        let key = wanted.key();
         if let Some(cached) = self.albums.get(&key) {
             return Ok(cached.clone());
         }
 
-        let term = format!("{artist} {album}");
+        // The Search API has no ISRC field, so the name is all there is to
+        // search with; the rest of the evidence sorts what comes back.
+        let term = format!("{} {}", wanted.artist, wanted.album);
         let limit = RESULT_LIMIT.to_string();
         let response: Option<SearchResponse> = self.http.get_json(
             SEARCH_URL,
@@ -90,15 +98,15 @@ impl Client {
 
         let copyright = response
             .as_ref()
-            .and_then(|response| best_match(&response.results, artist, album));
+            .and_then(|response| best_match(&response.results, wanted));
         self.albums.insert(key, copyright.clone());
         Ok(copyright)
     }
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        Client::copyright(self, artist, album)
+    fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        Client::copyright(self, wanted)
     }
 }
 
@@ -106,10 +114,10 @@ impl CopyrightLookup for Client {
 ///
 /// Closest, not first: a search for `Discovery` can return the deluxe edition
 /// ahead of the plain one, and the plain one is what was asked for.
-fn best_match(results: &[AlbumResult], artist: &str, album: &str) -> Option<String> {
+fn best_match(results: &[AlbumResult], wanted: &AlbumEvidence) -> Option<String> {
     results
         .iter()
-        .filter_map(|result| Some((rank(result, artist, album)?, result)))
+        .filter_map(|result| Some((rank(result, wanted)?, result)))
         .min_by_key(|(rank, _)| *rank)
         .and_then(|(_, result)| result.copyright.as_deref())
         .map(str::trim)
@@ -117,18 +125,33 @@ fn best_match(results: &[AlbumResult], artist: &str, album: &str) -> Option<Stri
         .map(str::to_owned)
 }
 
-/// How well a result matches, album first: two releases by one artist differ
-/// by their album name, so that is the more telling of the two.
-fn rank(result: &AlbumResult, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
-    Some((
-        confidence(result.collection_name.as_deref(), album)?,
-        confidence(result.artist_name.as_deref(), artist)?,
+/// How well a result matches everything the tag knows.
+fn rank(result: &AlbumResult, wanted: &AlbumEvidence) -> Option<Score> {
+    Some(Score::new(
+        confidence(result.collection_name.as_deref(), &wanted.album)?,
+        confidence(result.artist_name.as_deref(), &wanted.artist)?,
+        result.track_count,
+        wanted.total_tracks,
+        result.release_date.as_deref(),
+        wanted.year.as_deref(),
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tag that knows only the artist and album, as most do.
+    fn wanting(artist: &str, album: &str) -> AlbumEvidence {
+        AlbumEvidence {
+            artist: artist.to_owned(),
+            album: album.to_owned(),
+            isrc: None,
+            year: None,
+            total_tracks: None,
+            track_title: None,
+        }
+    }
 
     fn results(json: &str) -> Vec<AlbumResult> {
         serde_json::from_str::<SearchResponse>(json)
@@ -155,7 +178,7 @@ mod tests {
     #[test]
     fn takes_the_copyright_of_the_matching_album() {
         assert_eq!(
-            best_match(&results(DISCOVERY), "Daft Punk", "Discovery"),
+            best_match(&results(DISCOVERY), &wanting("Daft Punk", "Discovery")),
             Some("\u{2117} 2001 Daft Life Limited".to_owned())
         );
     }
@@ -164,14 +187,14 @@ mod tests {
     fn ignores_results_that_are_a_different_release() {
         // The right album by the wrong artist must not supply a copyright.
         assert_eq!(
-            best_match(&results(DISCOVERY), "Pink Floyd", "Discovery"),
+            best_match(&results(DISCOVERY), &wanting("Pink Floyd", "Discovery")),
             None
         );
         assert_eq!(
-            best_match(&results(DISCOVERY), "Daft Punk", "Homework"),
+            best_match(&results(DISCOVERY), &wanting("Daft Punk", "Homework")),
             None
         );
-        assert_eq!(best_match(&[], "Daft Punk", "Discovery"), None);
+        assert_eq!(best_match(&[], &wanting("Daft Punk", "Discovery")), None);
     }
 
     #[test]
@@ -184,7 +207,7 @@ mod tests {
             }]}"#,
         );
         assert_eq!(
-            best_match(&deluxe, "Daft Punk", "Random Access Memories"),
+            best_match(&deluxe, &wanting("Daft Punk", "Random Access Memories")),
             Some("\u{2117} 2013 Daft Life Limited".to_owned())
         );
 
@@ -196,7 +219,10 @@ mod tests {
             }]}"#,
         );
         // An album whose name normalizes to nothing cannot be matched safely.
-        assert_eq!(best_match(&punctuated, "Sigur R\u{f3}s", "( )"), None);
+        assert_eq!(
+            best_match(&punctuated, &wanting("Sigur R\u{f3}s", "( )")),
+            None
+        );
     }
 
     #[test]
@@ -204,11 +230,14 @@ mod tests {
         let blank = results(
             r#"{"results":[{"artistName":"Daft Punk","collectionName":"Discovery","copyright":"   "}]}"#,
         );
-        assert_eq!(best_match(&blank, "Daft Punk", "Discovery"), None);
+        assert_eq!(best_match(&blank, &wanting("Daft Punk", "Discovery")), None);
 
         let missing =
             results(r#"{"results":[{"artistName":"Daft Punk","collectionName":"Discovery"}]}"#);
-        assert_eq!(best_match(&missing, "Daft Punk", "Discovery"), None);
+        assert_eq!(
+            best_match(&missing, &wanting("Daft Punk", "Discovery")),
+            None
+        );
     }
 
     #[test]
@@ -229,7 +258,7 @@ mod tests {
             ]}"#,
         );
         assert_eq!(
-            best_match(&listed, "Daft Punk", "Discovery"),
+            best_match(&listed, &wanting("Daft Punk", "Discovery")),
             Some("\u{2117} 2001 Daft Life Limited".to_owned())
         );
     }
@@ -246,7 +275,10 @@ mod tests {
             ]}"#,
         );
         assert_eq!(
-            best_match(&listed, "Earth, Wind & Fire", "Earth, Wind & Fire"),
+            best_match(
+                &listed,
+                &wanting("Earth, Wind & Fire", "Earth, Wind & Fire")
+            ),
             None
         );
     }
@@ -261,8 +293,82 @@ mod tests {
             ]}"#,
         );
         assert_eq!(
-            best_match(&listed, "Earth, Wind and Fire", "I Am"),
+            best_match(&listed, &wanting("Earth, Wind and Fire", "I Am")),
             Some("\u{2117} 1979 Columbia".to_owned())
+        );
+    }
+
+    /// The case that names alone cannot settle. Both releases are called
+    /// `Discovery` by Daft Punk; only the track count says which is the album
+    /// and which is the deluxe edition.
+    #[test]
+    fn the_track_count_separates_an_album_from_its_deluxe_edition() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "trackCount":20,"releaseDate":"2021-01-01T00:00:00Z",
+                 "copyright":"℗ 2021 the deluxe reissue"},
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "trackCount":14,"releaseDate":"2001-03-12T00:00:00Z",
+                 "copyright":"℗ 2001 Daft Life Limited"}
+            ]}"#,
+        );
+
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.total_tracks = Some(14);
+        assert_eq!(
+            best_match(&listed, &wanted),
+            Some("\u{2117} 2001 Daft Life Limited".to_owned())
+        );
+
+        // Ask for twenty and the other one is right instead.
+        wanted.total_tracks = Some(20);
+        assert_eq!(
+            best_match(&listed, &wanted),
+            Some("\u{2117} 2021 the deluxe reissue".to_owned())
+        );
+    }
+
+    /// Where the track count is unknown, the year still separates a reissue
+    /// from the original.
+    #[test]
+    fn the_year_separates_a_reissue_from_the_original() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "releaseDate":"2021-01-01T00:00:00Z","copyright":"℗ 2021 the reissue"},
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "releaseDate":"2001-03-12T00:00:00Z","copyright":"℗ 2001 Daft Life Limited"}
+            ]}"#,
+        );
+
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.year = Some("2001".to_owned());
+        assert_eq!(
+            best_match(&listed, &wanted),
+            Some("\u{2117} 2001 Daft Life Limited".to_owned())
+        );
+    }
+
+    /// Evidence ranks candidates; it never rejects the only one there is. A
+    /// tag whose year disagrees with the sole match still gets a copyright,
+    /// because catalogues genuinely disagree about release dates.
+    #[test]
+    fn conflicting_evidence_still_beats_no_answer_at_all() {
+        let listed = results(
+            r#"{"results":[
+                {"artistName":"Daft Punk","collectionName":"Discovery",
+                 "trackCount":14,"releaseDate":"2001-03-12T00:00:00Z",
+                 "copyright":"℗ 2001 Daft Life Limited"}
+            ]}"#,
+        );
+
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.year = Some("1998".to_owned());
+        wanted.total_tracks = Some(9);
+        assert_eq!(
+            best_match(&listed, &wanted),
+            Some("\u{2117} 2001 Daft Life Limited".to_owned())
         );
     }
 }

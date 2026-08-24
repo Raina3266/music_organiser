@@ -19,7 +19,7 @@ pub use http::DEFAULT_MAX_WAIT;
 #[cfg(test)]
 mod testing;
 
-use crate::{CopyrightLookup, LookupError};
+use crate::{AlbumEvidence, CopyrightLookup, LookupError};
 
 /// A catalogue that can be asked for an album's copyright message.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -269,13 +269,13 @@ impl Chain {
 }
 
 impl CopyrightLookup for Chain {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
+    fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
         // A source that merely does not know this album is not a problem; the
         // next one is asked. Only an outright failure is worth reporting, and
         // only if nobody after it succeeds.
         let mut failure = None;
         for link in self.links.iter_mut().filter(|link| link.answering) {
-            match link.lookup.copyright(artist, album) {
+            match link.lookup.copyright(wanted) {
                 Ok(Some(copyright)) => {
                     link.hits += 1;
                     return Ok(Some(copyright));
@@ -356,7 +356,7 @@ mod tests {
     }
 
     impl CopyrightLookup for Scripted {
-        fn copyright(&mut self, _: &str, _: &str) -> Result<Option<String>, LookupError> {
+        fn copyright(&mut self, _: &AlbumEvidence) -> Result<Option<String>, LookupError> {
             let answer = self.answers[self.asked.min(self.answers.len() - 1)].clone();
             self.asked += 1;
             answer
@@ -378,6 +378,17 @@ mod tests {
         }
     }
 
+    fn wanting(artist: &str, album: &str) -> AlbumEvidence {
+        AlbumEvidence {
+            artist: artist.to_owned(),
+            album: album.to_owned(),
+            isrc: None,
+            year: None,
+            total_tracks: None,
+            track_title: None,
+        }
+    }
+
     fn found(copyright: &str) -> Result<Option<String>, LookupError> {
         Ok(Some(copyright.to_owned()))
     }
@@ -388,7 +399,7 @@ mod tests {
 
         assert_eq!(
             chain
-                .copyright("Daft Punk", "Discovery")
+                .copyright(&wanting("Daft Punk", "Discovery"))
                 .unwrap()
                 .as_deref(),
             Some("\u{2117} 2001 Daft Life")
@@ -409,11 +420,21 @@ mod tests {
             vec![found("\u{2117} 2001 Daft Life")],
         ]);
 
-        assert!(chain.copyright("Daft Punk", "Discovery").unwrap().is_some());
+        assert!(
+            chain
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(chain.still_answering(), 1);
 
         // A second album must not cost another request to the dead source.
-        assert!(chain.copyright("Daft Punk", "Homework").unwrap().is_some());
+        assert!(
+            chain
+                .copyright(&wanting("Daft Punk", "Homework"))
+                .unwrap()
+                .is_some()
+        );
         let tally = chain.tally();
         assert_eq!(tally[0], (Source::Itunes, 0, false));
         assert_eq!(tally[1].1, 2);
@@ -427,7 +448,7 @@ mod tests {
         ]);
 
         let error = chain
-            .copyright("Daft Punk", "Discovery")
+            .copyright(&wanting("Daft Punk", "Discovery"))
             .expect_err("with every source dead there is nothing to do");
 
         assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
@@ -442,7 +463,9 @@ mod tests {
             vec![Ok(None)],
         ]);
 
-        let error = chain.copyright("Daft Punk", "Discovery").unwrap_err();
+        let error = chain
+            .copyright(&wanting("Daft Punk", "Discovery"))
+            .unwrap_err();
 
         assert!(matches!(error, LookupError::Album(_)), "{error}");
         assert_eq!(chain.still_answering(), 2);

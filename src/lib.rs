@@ -14,7 +14,8 @@ pub mod metadata;
 pub mod sources;
 
 pub use copyright::{
-    CopyrightError, CopyrightLookup, CopyrightReport, LookupError, refresh_copyrights,
+    AlbumEvidence, CopyrightError, CopyrightLookup, CopyrightReport, LookupError,
+    refresh_copyrights,
 };
 pub use delete::{DeleteReport, delete_tags_recursively};
 pub use export::{
@@ -23,4 +24,4 @@ pub use export::{
 pub use files::FileError;
 pub use frames::{SUPPORTED_TAGS, TagSpec};
 pub use lyrics::{Language, parse_language};
-pub use metadata::{MetadataReport, album_of, finalize};
+pub use metadata::{MetadataReport, album_of, evidence_of, finalize};

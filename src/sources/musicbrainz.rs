@@ -18,9 +18,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::AlbumEvidence;
 use crate::sources::{
     http::Http,
-    naming::{Confidence, confidence, copyright_line, year_of},
+    naming::{Score, confidence, copyright_line, year_of},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -51,6 +52,10 @@ struct ReleaseStub {
     title: Option<String>,
     #[serde(rename = "artist-credit", default)]
     artist_credit: Vec<ArtistCredit>,
+    /// Corroboration carried by the search result itself.
+    date: Option<String>,
+    #[serde(rename = "track-count")]
+    track_count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,21 +120,37 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
+    fn lookup(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        // The release index is searchable by ISRC, which finds the releases
+        // that provably carry the recording instead of the ones whose name
+        // merely resembles the tag's. The album name still ranks them, since
+        // a recording sits on the album, the single and the compilations
+        // alike.
+        if let Some(isrc) = &wanted.isrc
+            && let Some(copyright) =
+                self.search_releases(&format!("isrc:{}", quote_for_lucene(isrc)), wanted)?
+        {
+            return Ok(Some(copyright));
+        }
         let query = format!(
             "artist:{} AND release:{}",
-            quote_for_lucene(artist),
-            quote_for_lucene(album)
+            quote_for_lucene(&wanted.artist),
+            quote_for_lucene(&wanted.album)
         );
+        self.search_releases(&query, wanted)
+    }
+
+    /// Run one release search and open the closest matches it returns.
+    fn search_releases(
+        &mut self,
+        query: &str,
+        wanted: &AlbumEvidence,
+    ) -> Result<Option<String>, LookupError> {
         let limit = RESULT_LIMIT.to_string();
         let releases = self.releases.clone();
         let Some(found): Option<SearchResponse> = self.http.get_json(
             &releases,
-            &[
-                ("query", query.as_str()),
-                ("limit", limit.as_str()),
-                ("fmt", "json"),
-            ],
+            &[("query", query), ("limit", limit.as_str()), ("fmt", "json")],
             &[],
         )?
         else {
@@ -143,7 +164,7 @@ impl Client {
         let mut candidates: Vec<(_, &ReleaseStub)> = found
             .releases
             .iter()
-            .filter_map(|release| Some((rank(release, artist, album)?, release)))
+            .filter_map(|release| Some((rank(release, wanted)?, release)))
             .collect();
         candidates.sort_by_key(|(rank, _)| *rank);
         let candidates = candidates
@@ -169,29 +190,36 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        if artist.trim().is_empty() || album.trim().is_empty() {
+    fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        if !wanted.is_searchable() {
             return Ok(None);
         }
-        let key = (artist.to_owned(), album.to_owned());
+        let key = wanted.key();
         if let Some(cached) = self.albums.get(&key) {
             return Ok(cached.clone());
         }
-        let copyright = self.lookup(artist, album)?;
+        let copyright = self.lookup(wanted)?;
         self.albums.insert(key, copyright.clone());
         Ok(copyright)
     }
 }
 
 /// How well a search result matches, or `None` when it is a different release.
-fn rank(release: &ReleaseStub, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
-    let album = confidence(release.title.as_deref(), album)?;
+fn rank(release: &ReleaseStub, wanted: &AlbumEvidence) -> Option<Score> {
+    let name = confidence(release.title.as_deref(), &wanted.album)?;
     let artist = release
         .artist_credit
         .iter()
-        .filter_map(|credit| confidence(credit.name.as_deref(), artist))
+        .filter_map(|credit| confidence(credit.name.as_deref(), &wanted.artist))
         .min()?;
-    Some((album, artist))
+    Some(Score::new(
+        name,
+        artist,
+        release.track_count,
+        wanted.total_tracks,
+        release.date.as_deref(),
+        wanted.year.as_deref(),
+    ))
 }
 
 /// The copyright line for a release, preferring ℗ over ©.
@@ -242,6 +270,17 @@ mod tests {
         {"id":"bare","title":"Discovery","artist-credit":[{"name":"Daft Punk"}]},
         {"id":"credited","title":"Discovery","artist-credit":[{"name":"Daft Punk"}]}
     ]}"#;
+
+    fn wanting(artist: &str, album: &str) -> AlbumEvidence {
+        AlbumEvidence {
+            artist: artist.to_owned(),
+            album: album.to_owned(),
+            isrc: None,
+            year: None,
+            total_tracks: None,
+            track_title: None,
+        }
+    }
 
     fn release(json: &str) -> Release {
         serde_json::from_str(json).unwrap()
@@ -312,7 +351,7 @@ mod tests {
         let matching: Vec<&str> = found
             .releases
             .iter()
-            .filter(|release| rank(release, "Daft Punk", "Discovery").is_some())
+            .filter(|release| rank(release, &wanting("Daft Punk", "Discovery")).is_some())
             .map(|release| release.id.as_str())
             .collect();
         assert_eq!(matching, ["two"]);
@@ -337,7 +376,9 @@ mod tests {
         ]);
         let mut client = Client::pointing_at(&server.address);
 
-        let copyright = client.copyright("Daft Punk", "Discovery").unwrap();
+        let copyright = client
+            .copyright(&wanting("Daft Punk", "Discovery"))
+            .unwrap();
 
         assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
         let asked: Vec<String> = server
@@ -361,8 +402,18 @@ mod tests {
         let server = Server::answering(&[r#"{"releases":[]}"#]);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
 
         assert_eq!(server.requests().len(), 1);
     }
@@ -372,9 +423,84 @@ mod tests {
         let server = Server::answering(&[]);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("  ", "Discovery").unwrap(), None);
-        assert_eq!(client.copyright("Daft Punk", "").unwrap(), None);
+        assert_eq!(client.copyright(&wanting("  ", "Discovery")).unwrap(), None);
+        assert_eq!(client.copyright(&wanting("Daft Punk", "")).unwrap(), None);
 
         assert!(server.requests().is_empty());
+    }
+
+    /// MusicBrainz indexes releases by the ISRCs they carry, so the exact
+    /// identifier replaces the name search rather than adding a request.
+    #[test]
+    fn an_isrc_is_searched_for_before_a_name() {
+        let server = Server::answering(&[
+            r#"{"releases":[
+                {"id":"right","title":"Discovery","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"date":"2001-03-12","relations":[
+                {"type":"phonographic copyright","begin":"2001","label":{"name":"Daft Life Ltd."}}
+            ]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        let copyright = client.copyright(&wanted).unwrap();
+
+        assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
+        let asked = server.requests();
+        assert_eq!(
+            asked[0].target,
+            "/?query=isrc%3A%22GBUM71029604%22&limit=10&fmt=json"
+        );
+        assert_eq!(asked[1].target, "/right?inc=label-rels&fmt=json");
+    }
+
+    #[test]
+    fn a_fruitless_isrc_falls_back_to_the_name() {
+        let server = Server::answering(&[
+            r#"{"releases":[]}"#,
+            r#"{"releases":[
+                {"id":"named","title":"Discovery","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"date":"2001","relations":[
+                {"type":"phonographic copyright","label":{"name":"Daft Life Ltd."}}
+            ]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        assert!(client.copyright(&wanted).unwrap().is_some());
+        let asked = server.requests();
+        assert!(asked[0].target.contains("isrc"), "{}", asked[0].target);
+        assert!(asked[1].target.contains("artist"), "{}", asked[1].target);
+    }
+
+    /// Only three releases are ever opened, so the evidence decides which
+    /// three: MusicBrainz lists a release per pressing.
+    #[test]
+    fn the_track_count_puts_the_right_pressing_first() {
+        let server = Server::answering(&[
+            r#"{"releases":[
+                {"id":"deluxe","title":"Discovery","artist-credit":[{"name":"Daft Punk"}],
+                 "track-count":20,"date":"2021"},
+                {"id":"original","title":"Discovery","artist-credit":[{"name":"Daft Punk"}],
+                 "track-count":14,"date":"2001-03-12"}
+            ]}"#,
+            r#"{"date":"2001-03-12","relations":[
+                {"type":"phonographic copyright","begin":"2001","label":{"name":"Daft Life Ltd."}}
+            ]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.total_tracks = Some(14);
+
+        assert!(client.copyright(&wanted).unwrap().is_some());
+        // The fourteen-track pressing is opened first and answers, so the
+        // twenty-track one is never fetched at all.
+        let asked = server.requests();
+        assert_eq!(asked[1].target, "/original?inc=label-rels&fmt=json");
+        assert_eq!(asked.len(), 2);
     }
 }

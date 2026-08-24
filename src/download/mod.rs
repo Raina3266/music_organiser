@@ -366,15 +366,18 @@ fn downloaded_files(
 
 /// Look up one file's album on iTunes, using the tag spotDL wrote.
 fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<String>, String> {
-    let Some((artist, album)) = metadata::album_of(audio) else {
+    let Some(wanted) = metadata::evidence_of(audio) else {
         println!("The downloaded file has no album artist and album to search iTunes with.");
         return Ok(None);
     };
     let copyright = client
-        .copyright(&artist, &album)
+        .copyright(&wanted)
         .map_err(|error| error.to_string())?;
     if copyright.is_none() {
-        println!("iTunes has no matching album for \"{artist} - {album}\".");
+        println!(
+            "iTunes has no matching album for \"{} - {}\".",
+            wanted.artist, wanted.album
+        );
     }
     Ok(copyright)
 }

@@ -28,6 +28,78 @@ pub enum Confidence {
     Edition,
 }
 
+/// Whether a piece of corroborating evidence agrees, is missing, or conflicts.
+///
+/// Three states rather than a numeric distance, because the distances are not
+/// comparable: being two tracks out and being two years out say different
+/// things, and inventing a scale to weigh them against each other would be
+/// making up precision that is not there. Missing evidence sits between
+/// agreement and conflict, so a candidate that can be checked and agrees beats
+/// one that cannot be checked, which in turn beats one that disagrees.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum Agreement {
+    Agrees,
+    Unknown,
+    Differs,
+}
+
+/// How well a candidate release matches everything known about the wanted one.
+///
+/// Ordered best first, field by field: the release name decides, then the
+/// artist, then the corroborating evidence. Track count comes before year
+/// because it is the sharper instrument — `Discovery` has fourteen tracks and
+/// `Discovery (Deluxe Edition)` has twenty, while both were released the same
+/// year.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Score {
+    pub name: Confidence,
+    pub artist: Confidence,
+    pub tracks: Agreement,
+    pub year: Agreement,
+}
+
+impl Score {
+    /// Score a candidate whose name and artist have already been matched.
+    pub fn new(
+        name: Confidence,
+        artist: Confidence,
+        candidate_tracks: Option<u32>,
+        wanted_tracks: Option<u32>,
+        candidate_year: Option<&str>,
+        wanted_year: Option<&str>,
+    ) -> Self {
+        Self {
+            name,
+            artist,
+            tracks: agreement(candidate_tracks, wanted_tracks, |a, b| a == b),
+            year: agreement(year_of(candidate_year), year_of(wanted_year), years_agree),
+        }
+    }
+}
+
+fn agreement<T>(
+    candidate: Option<T>,
+    wanted: Option<T>,
+    same: impl Fn(&T, &T) -> bool,
+) -> Agreement {
+    match (candidate, wanted) {
+        (Some(candidate), Some(wanted)) if same(&candidate, &wanted) => Agreement::Agrees,
+        (Some(_), Some(_)) => Agreement::Differs,
+        _ => Agreement::Unknown,
+    }
+}
+
+/// Whether two release years are close enough to be the same release.
+///
+/// A year of slack, because a release crosses new year between storefronts and
+/// catalogues disagree about which side it landed on.
+fn years_agree(candidate: &String, wanted: &String) -> bool {
+    match (candidate.parse::<i32>(), wanted.parse::<i32>()) {
+        (Ok(candidate), Ok(wanted)) => (candidate - wanted).abs() <= 1,
+        _ => candidate == wanted,
+    }
+}
+
 /// Words that mark an edition of a release rather than a different release.
 ///
 /// `feat` is here because a featured-artist credit annotates a release without
@@ -474,5 +546,73 @@ mod tests {
             Some("\u{a9} Daft Life Limited")
         );
         assert_eq!(copyright_line('\u{2117}', Some("2001"), "  "), None);
+    }
+
+    #[test]
+    fn evidence_ranks_agreement_above_ignorance_above_conflict() {
+        assert!(Agreement::Agrees < Agreement::Unknown);
+        assert!(Agreement::Unknown < Agreement::Differs);
+    }
+
+    #[test]
+    fn the_release_name_outweighs_the_corroborating_evidence() {
+        let exact_but_unverified =
+            Score::new(Confidence::Exact, Confidence::Exact, None, None, None, None);
+        let edition_with_everything_agreeing = Score::new(
+            Confidence::Edition,
+            Confidence::Exact,
+            Some(14),
+            Some(14),
+            Some("2001"),
+            Some("2001"),
+        );
+        // A name that matches exactly wins even when a deluxe edition's track
+        // count and year both agree: the name identifies the release.
+        assert!(exact_but_unverified < edition_with_everything_agreeing);
+    }
+
+    #[test]
+    fn the_track_count_decides_between_two_identical_names() {
+        let agrees = Score::new(
+            Confidence::Exact,
+            Confidence::Exact,
+            Some(14),
+            Some(14),
+            None,
+            None,
+        );
+        let differs = Score::new(
+            Confidence::Exact,
+            Confidence::Exact,
+            Some(20),
+            Some(14),
+            None,
+            None,
+        );
+        assert!(agrees < differs);
+    }
+
+    /// Catalogues put a release either side of new year, so a year of slack
+    /// counts as agreement and anything more does not.
+    #[test]
+    fn a_year_of_slack_still_counts_as_the_same_release() {
+        let near = Score::new(
+            Confidence::Exact,
+            Confidence::Exact,
+            None,
+            None,
+            Some("2002-01-04"),
+            Some("2001"),
+        );
+        assert_eq!(near.year, Agreement::Agrees);
+        let far = Score::new(
+            Confidence::Exact,
+            Confidence::Exact,
+            None,
+            None,
+            Some("2021"),
+            Some("2001"),
+        );
+        assert_eq!(far.year, Agreement::Differs);
     }
 }

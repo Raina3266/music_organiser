@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::AlbumEvidence;
 use crate::sources::{
     http::Http,
-    naming::{Confidence, confidence},
+    naming::{Score, confidence},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -36,6 +37,20 @@ const RESULT_LIMIT: u8 = 10;
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     albums: Option<AlbumPage>,
+    /// Present when the search asked for tracks, which is how an ISRC is
+    /// looked up: the recording is found, and its album comes back with it.
+    tracks: Option<TrackPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TrackPage {
+    #[serde(default)]
+    items: Vec<Track>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Track {
+    album: Option<AlbumStub>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +65,12 @@ struct AlbumStub {
     name: Option<String>,
     #[serde(default)]
     artists: Vec<Named>,
+    /// Corroboration, carried by the simplified album the search returns, so
+    /// ranking costs no extra request.
+    #[serde(rename = "total_tracks")]
+    total_tracks: Option<u32>,
+    #[serde(rename = "release_date")]
+    release_date: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,44 +129,28 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        // Spotify's field filters keep a search for an album from answering
-        // with a track or a playlist that merely mentions it.
-        let query = format!(
-            "album:{} artist:{}",
-            quote_for_search(album),
-            quote_for_search(artist)
-        );
-        let limit = RESULT_LIMIT.to_string();
-        let authorization = self.authorization.clone();
-        let search = self.search.clone();
-        let Some(found): Option<SearchResponse> = self.http.get_json(
-            &search,
-            &[
-                ("q", query.as_str()),
-                ("type", "album"),
-                ("limit", limit.as_str()),
-            ],
-            &[("Authorization", authorization.as_str())],
-        )?
-        else {
+    fn lookup(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        // An ISRC names the recording exactly, so it is worth asking with
+        // first: it cannot come back with the wrong artist's album the way a
+        // name search can. It identifies a recording rather than a release,
+        // though — the same one sits on the album, the single and any number
+        // of compilations — so the releases it turns up are still ranked by
+        // name.
+        let mut chosen = match &wanted.isrc {
+            Some(isrc) => self.album_carrying(isrc, wanted)?,
+            None => None,
+        };
+        if chosen.is_none() {
+            chosen = self.album_named(wanted)?;
+        }
+        let Some(id) = chosen else {
             return Ok(None);
         };
 
         // The search answers with a simplified album that carries no
         // copyrights, so the match has to be fetched in full.
-        let Some(id) = found
-            .albums
-            .iter()
-            .flat_map(|page| &page.items)
-            .filter_map(|candidate| Some((rank(candidate, artist, album)?, candidate)))
-            .min_by_key(|(rank, _)| *rank)
-            .and_then(|(_, candidate)| candidate.id.clone())
-        else {
-            return Ok(None);
-        };
-
         let url = format!("{}/{id}", self.album_url);
+        let authorization = self.authorization.clone();
         let Some(album): Option<Album> =
             self.http
                 .get_json(&url, &[], &[("Authorization", authorization.as_str())])?
@@ -154,18 +159,71 @@ impl Client {
         };
         Ok(copyright_of(&album))
     }
+
+    /// The best release carrying a given recording, found by its ISRC.
+    ///
+    /// Every album this returns provably contains the recording, which makes a
+    /// resembling name much safer evidence than it would be from a plain
+    /// search.
+    fn album_carrying(
+        &mut self,
+        isrc: &str,
+        wanted: &AlbumEvidence,
+    ) -> Result<Option<String>, LookupError> {
+        let query = format!("isrc:{isrc}");
+        let Some(found) = self.search(&query, "track")? else {
+            return Ok(None);
+        };
+        Ok(best_of(
+            found
+                .tracks
+                .iter()
+                .flat_map(|page| &page.items)
+                .filter_map(|track| track.album.as_ref()),
+            wanted,
+        ))
+    }
+
+    /// The best release matching the artist and album name.
+    fn album_named(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        // Spotify's field filters keep a search for an album from answering
+        // with a track or a playlist that merely mentions it.
+        let query = format!(
+            "album:{} artist:{}",
+            quote_for_search(&wanted.album),
+            quote_for_search(&wanted.artist)
+        );
+        let Some(found) = self.search(&query, "album")? else {
+            return Ok(None);
+        };
+        Ok(best_of(
+            found.albums.iter().flat_map(|page| &page.items),
+            wanted,
+        ))
+    }
+
+    fn search(&mut self, query: &str, kind: &str) -> Result<Option<SearchResponse>, LookupError> {
+        let limit = RESULT_LIMIT.to_string();
+        let authorization = self.authorization.clone();
+        let search = self.search.clone();
+        self.http.get_json(
+            &search,
+            &[("q", query), ("type", kind), ("limit", limit.as_str())],
+            &[("Authorization", authorization.as_str())],
+        )
+    }
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        if artist.trim().is_empty() || album.trim().is_empty() {
+    fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        if !wanted.is_searchable() {
             return Ok(None);
         }
-        let key = (artist.to_owned(), album.to_owned());
+        let key = wanted.key();
         if let Some(cached) = self.albums.get(&key) {
             return Ok(cached.clone());
         }
-        let copyright = self.lookup(artist, album)?;
+        let copyright = self.lookup(wanted)?;
         self.albums.insert(key, copyright.clone());
         Ok(copyright)
     }
@@ -175,15 +233,33 @@ impl CopyrightLookup for Client {
 ///
 /// The album is ranked first: a search constrained to one artist separates its
 /// results by album name, so that is what decides between them.
-fn rank(candidate: &AlbumStub, artist: &str, album: &str) -> Option<(Confidence, Confidence)> {
+fn rank(candidate: &AlbumStub, wanted: &AlbumEvidence) -> Option<Score> {
     candidate.id.as_ref()?;
-    let album = confidence(candidate.name.as_deref(), album)?;
+    let name = confidence(candidate.name.as_deref(), &wanted.album)?;
     let artist = candidate
         .artists
         .iter()
-        .filter_map(|credited| confidence(credited.name.as_deref(), artist))
+        .filter_map(|credited| confidence(credited.name.as_deref(), &wanted.artist))
         .min()?;
-    Some((album, artist))
+    Some(Score::new(
+        name,
+        artist,
+        candidate.total_tracks,
+        wanted.total_tracks,
+        candidate.release_date.as_deref(),
+        wanted.year.as_deref(),
+    ))
+}
+
+/// The id of the best-ranked album among some candidates.
+fn best_of<'a>(
+    candidates: impl Iterator<Item = &'a AlbumStub>,
+    wanted: &AlbumEvidence,
+) -> Option<String> {
+    candidates
+        .filter_map(|candidate| Some((rank(candidate, wanted)?, candidate)))
+        .min_by_key(|(rank, _)| *rank)
+        .and_then(|(_, candidate)| candidate.id.clone())
 }
 
 /// The album's copyright line, preferring ℗ over ©.
@@ -237,6 +313,17 @@ fn quote_for_search(value: &str) -> String {
 mod tests {
     use super::*;
     use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
+
+    fn wanting(artist: &str, album: &str) -> AlbumEvidence {
+        AlbumEvidence {
+            artist: artist.to_owned(),
+            album: album.to_owned(),
+            isrc: None,
+            year: None,
+            total_tracks: None,
+            track_title: None,
+        }
+    }
 
     fn album(json: &str) -> Album {
         serde_json::from_str(json).unwrap()
@@ -310,7 +397,7 @@ mod tests {
             .albums
             .iter()
             .flat_map(|page| &page.items)
-            .filter(|candidate| rank(candidate, "Daft Punk", "Discovery").is_some())
+            .filter(|candidate| rank(candidate, &wanting("Daft Punk", "Discovery")).is_some())
             .filter_map(|candidate| candidate.id.as_deref())
             .collect();
         assert_eq!(chosen, ["two"]);
@@ -334,7 +421,9 @@ mod tests {
         ]);
         let mut client = Client::pointing_at(&server.address);
 
-        let copyright = client.copyright("Daft Punk", "Discovery").unwrap();
+        let copyright = client
+            .copyright(&wanting("Daft Punk", "Discovery"))
+            .unwrap();
 
         assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
         let asked = server.requests();
@@ -355,7 +444,12 @@ mod tests {
         ]);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
 
         assert_eq!(server.requests().len(), 1);
     }
@@ -366,7 +460,7 @@ mod tests {
         let mut client = Client::pointing_at(&server.address);
 
         let error = client
-            .copyright("Daft Punk", "Discovery")
+            .copyright(&wanting("Daft Punk", "Discovery"))
             .expect_err("an expired token must not look like an album nobody has");
 
         assert!(error.to_string().contains("expired"), "{error}");
@@ -378,9 +472,111 @@ mod tests {
         let server = Server::answering(&[r#"{"albums":{"items":[]}}"#]);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
 
         assert_eq!(server.requests().len(), 1);
+    }
+
+    /// An ISRC is asked with first, as a track search: it names the recording
+    /// exactly, so it cannot come back with another artist's album.
+    #[test]
+    fn an_isrc_is_searched_for_before_a_name() {
+        let server = Server::answering(&[
+            r#"{"tracks":{"items":[
+                {"album":{"id":"right","name":"Discovery","artists":[{"name":"Daft Punk"}],
+                          "total_tracks":14,"release_date":"2001-03-12"}}
+            ]}}"#,
+            r#"{"copyrights":[{"text":"℗ 2001 Daft Life Ltd.","type":"P"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        let copyright = client.copyright(&wanted).unwrap();
+
+        assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
+        let asked = server.requests();
+        assert_eq!(
+            asked[0].target,
+            "/search?q=isrc%3AGBUM71029604&type=track&limit=10"
+        );
+        assert_eq!(asked[1].target, "/albums/right");
+        // Still two requests per album, the same as a name lookup.
+        assert_eq!(asked.len(), 2);
+    }
+
+    /// A recording sits on the album, the single and the compilations alike,
+    /// so the releases an ISRC turns up are still ranked by name.
+    #[test]
+    fn the_album_name_chooses_between_the_releases_an_isrc_finds() {
+        let server = Server::answering(&[
+            r#"{"tracks":{"items":[
+                {"album":{"id":"compilation","name":"Now That's What I Call Music! 48",
+                          "artists":[{"name":"Various Artists"}]}},
+                {"album":{"id":"album","name":"Discovery","artists":[{"name":"Daft Punk"}]}}
+            ]}}"#,
+            r#"{"copyrights":[{"text":"℗ 2001 Daft Life Ltd.","type":"P"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        assert!(client.copyright(&wanted).unwrap().is_some());
+        assert_eq!(server.requests()[1].target, "/albums/album");
+    }
+
+    /// An ISRC that finds nothing must not lose the album: the name search is
+    /// still there to fall back on.
+    #[test]
+    fn a_fruitless_isrc_falls_back_to_the_name() {
+        let server = Server::answering(&[
+            r#"{"tracks":{"items":[]}}"#,
+            r#"{"albums":{"items":[
+                {"id":"named","name":"Discovery","artists":[{"name":"Daft Punk"}]}
+            ]}}"#,
+            r#"{"copyrights":[{"text":"℗ 2001 Daft Life Ltd.","type":"P"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.isrc = Some("GBUM71029604".to_owned());
+
+        assert!(client.copyright(&wanted).unwrap().is_some());
+        let asked = server.requests();
+        assert!(asked[0].target.contains("isrc"), "{}", asked[0].target);
+        assert!(asked[1].target.contains("album%3A"), "{}", asked[1].target);
+        assert_eq!(asked[2].target, "/albums/named");
+    }
+
+    /// Without an ISRC nothing changes: one search, by name.
+    #[test]
+    fn a_file_with_no_isrc_searches_by_name_alone() {
+        let server = Server::answering(&[
+            r#"{"albums":{"items":[
+                {"id":"named","name":"Discovery","artists":[{"name":"Daft Punk"}]}
+            ]}}"#,
+            r#"{"copyrights":[{"text":"℗ 2001 Daft Life Ltd.","type":"P"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+
+        assert!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap()
+                .is_some()
+        );
+        let asked = server.requests();
+        assert_eq!(asked.len(), 2);
+        assert!(!asked[0].target.contains("isrc"), "{}", asked[0].target);
     }
 }

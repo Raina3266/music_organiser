@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::AlbumEvidence;
 use crate::sources::{
     http::Http,
-    naming::{copyright_line, matches_name},
+    naming::{Agreement, Score, confidence, copyright_line},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -50,6 +51,9 @@ struct SearchResult {
 #[derive(Debug, Deserialize)]
 struct Release {
     title: Option<String>,
+    /// Corroboration: the tracklist's length is the album's track count.
+    #[serde(default)]
+    tracklist: Vec<serde_json::Value>,
     /// Discogs has spelled this as a number and as a string over the years.
     #[serde(default)]
     year: Option<serde_json::Value>,
@@ -116,15 +120,15 @@ impl Client {
         }
     }
 
-    fn lookup(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
+    fn lookup(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
         let limit = RESULT_LIMIT.to_string();
         let authorization = self.token.clone();
         let search = self.search.clone();
         let Some(found): Option<SearchResponse> = self.http.get_json(
             &search,
             &[
-                ("artist", artist),
-                ("release_title", album),
+                ("artist", wanted.artist.as_str()),
+                ("release_title", wanted.album.as_str()),
                 ("type", "release"),
                 ("per_page", limit.as_str()),
             ],
@@ -149,7 +153,13 @@ impl Client {
                 continue;
             };
             opened += 1;
-            if !is_the_release(&release, artist, album) {
+            // Candidates are opened in the order the search returned them, so
+            // ranking cannot reorder them; what it can do is refuse one that
+            // the evidence says is a different release.
+            let Some(score) = rank(&release, wanted) else {
+                continue;
+            };
+            if score.tracks == Agreement::Differs {
                 continue;
             }
             if let Some(copyright) = copyright_of(&release) {
@@ -161,26 +171,35 @@ impl Client {
 }
 
 impl CopyrightLookup for Client {
-    fn copyright(&mut self, artist: &str, album: &str) -> Result<Option<String>, LookupError> {
-        if artist.trim().is_empty() || album.trim().is_empty() {
+    fn copyright(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
+        if !wanted.is_searchable() {
             return Ok(None);
         }
-        let key = (artist.to_owned(), album.to_owned());
+        let key = wanted.key();
         if let Some(cached) = self.albums.get(&key) {
             return Ok(cached.clone());
         }
-        let copyright = self.lookup(artist, album)?;
+        let copyright = self.lookup(wanted)?;
         self.albums.insert(key, copyright.clone());
         Ok(copyright)
     }
 }
 
-fn is_the_release(release: &Release, artist: &str, album: &str) -> bool {
-    matches_name(release.title.as_deref(), album)
-        && release
-            .artists
-            .iter()
-            .any(|credited| matches_name(credited.name.as_deref(), artist))
+fn rank(release: &Release, wanted: &AlbumEvidence) -> Option<Score> {
+    let name = confidence(release.title.as_deref(), &wanted.album)?;
+    let artist = release
+        .artists
+        .iter()
+        .filter_map(|credited| confidence(credited.name.as_deref(), &wanted.artist))
+        .min()?;
+    Some(Score::new(
+        name,
+        artist,
+        Some(release.tracklist.len() as u32).filter(|count| *count > 0),
+        wanted.total_tracks,
+        year_of(release).as_deref(),
+        wanted.year.as_deref(),
+    ))
 }
 
 /// The copyright line for a release, preferring ℗ over ©.
@@ -226,6 +245,17 @@ mod tests {
     use super::*;
     use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
 
+    fn wanting(artist: &str, album: &str) -> AlbumEvidence {
+        AlbumEvidence {
+            artist: artist.to_owned(),
+            album: album.to_owned(),
+            isrc: None,
+            year: None,
+            total_tracks: None,
+            track_title: None,
+        }
+    }
+
     fn release(json: &str) -> Release {
         serde_json::from_str(json).unwrap()
     }
@@ -251,21 +281,10 @@ mod tests {
 
     #[test]
     fn matches_a_disambiguated_artist_name() {
-        assert!(is_the_release(
-            &release(DISCOVERY),
-            "Daft Punk",
-            "Discovery"
-        ));
-        assert!(!is_the_release(
-            &release(DISCOVERY),
-            "Stardust",
-            "Discovery"
-        ));
-        assert!(!is_the_release(
-            &release(DISCOVERY),
-            "Daft Punk",
-            "Homework"
-        ));
+        let matches = |artist, album| rank(&release(DISCOVERY), &wanting(artist, album)).is_some();
+        assert!(matches("Daft Punk", "Discovery"));
+        assert!(!matches("Stardust", "Discovery"));
+        assert!(!matches("Daft Punk", "Homework"));
     }
 
     #[test]
@@ -330,7 +349,9 @@ mod tests {
         ]);
         let mut client = Client::pointing_at(&server.address);
 
-        let copyright = client.copyright("Daft Punk", "Discovery").unwrap();
+        let copyright = client
+            .copyright(&wanting("Daft Punk", "Discovery"))
+            .unwrap();
 
         assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
         let asked = server.requests();
@@ -356,7 +377,12 @@ mod tests {
         let server = Server::answering(&script);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
 
         assert_eq!(server.requests().len(), 1 + MAX_RELEASES_FETCHED);
     }
@@ -366,9 +392,67 @@ mod tests {
         let server = Server::answering(&[r#"{"results":[]}"#]);
         let mut client = Client::pointing_at(&server.address);
 
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
-        assert_eq!(client.copyright("Daft Punk", "Discovery").unwrap(), None);
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap(),
+            None
+        );
 
         assert_eq!(server.requests().len(), 1);
+    }
+
+    /// Discogs opens candidates in the order its search returned them, so
+    /// ranking cannot reorder them. What it can do is refuse one the evidence
+    /// contradicts, and carry on to the next.
+    #[test]
+    fn a_release_whose_track_count_contradicts_the_tag_is_passed_over() {
+        let server = Server::answering(&[
+            r#"{"results":[{"id":11},{"id":22}]}"#,
+            // Right name, wrong record: twenty tracks against the tag's
+            // fourteen.
+            r#"{"title":"Discovery","year":2021,"artists":[{"name":"Daft Punk"}],
+                "tracklist":[{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}],
+                "companies":[{"name":"the deluxe reissue",
+                              "entity_type_name":"Phonographic Copyright (p)"}]}"#,
+            r#"{"title":"Discovery","year":2001,"artists":[{"name":"Daft Punk"}],
+                "tracklist":[{},{},{},{},{},{},{},{},{},{},{},{},{},{}],
+                "companies":[{"name":"Daft Life Ltd.",
+                              "entity_type_name":"Phonographic Copyright (p)"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut wanted = wanting("Daft Punk", "Discovery");
+        wanted.total_tracks = Some(14);
+
+        let copyright = client.copyright(&wanted).unwrap();
+
+        assert_eq!(copyright.as_deref(), Some("\u{2117} 2001 Daft Life Ltd."));
+        assert_eq!(server.requests().len(), 3);
+    }
+
+    /// A tag with no track count cannot contradict anything, so the first
+    /// matching release still answers.
+    #[test]
+    fn without_a_track_count_the_first_match_still_answers() {
+        let server = Server::answering(&[
+            r#"{"results":[{"id":11}]}"#,
+            r#"{"title":"Discovery","year":2021,"artists":[{"name":"Daft Punk"}],
+                "tracklist":[{},{}],
+                "companies":[{"name":"whoever","entity_type_name":"Phonographic Copyright (p)"}]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+
+        assert!(
+            client
+                .copyright(&wanting("Daft Punk", "Discovery"))
+                .unwrap()
+                .is_some()
+        );
     }
 }
