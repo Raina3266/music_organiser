@@ -11,12 +11,27 @@ use serde::de::DeserializeOwned;
 
 use crate::LookupError;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long to let one request hang before calling it a timeout.
+///
+/// Generous, because MusicBrainz in particular does answer slowly under load
+/// and a timeout that fires early turns a slow success into a retried failure.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RATE_LIMIT_RETRIES: u32 = 3;
 /// Longest wait to honour before treating the source as spent. A server that
 /// asks for more than this is telling us to come back another day, not to
 /// sleep on it.
 pub const DEFAULT_MAX_WAIT: u64 = 60;
+/// How many times to try one request before giving up on that album.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+/// Longest backoff between attempts at a request that keeps failing.
+const MAX_BACKOFF: u64 = 30;
+/// How many albums may give up in a row before the source is presumed
+/// unreachable.
+///
+/// One album timing out says nothing; a run of them says the network is down
+/// or the catalogue is refusing everyone, and grinding through a whole library
+/// at five attempts each would take hours to discover that.
+const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 
 /// A blocking JSON client that keeps one source inside its rate limit.
 pub struct Http {
@@ -31,6 +46,10 @@ pub struct Http {
     forbidden_is_throttling: bool,
     /// Longest `Retry-After` to sit through before giving up on the source.
     max_wait: u64,
+    /// How many times to try one request before giving up on that album.
+    max_attempts: u32,
+    /// Requests that have given up since the last success.
+    consecutive_failures: u32,
 }
 
 impl Http {
@@ -56,6 +75,8 @@ impl Http {
             last_request: None,
             forbidden_is_throttling: false,
             max_wait: DEFAULT_MAX_WAIT,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            consecutive_failures: 0,
         })
     }
 
@@ -63,6 +84,12 @@ impl Http {
     /// rather than merely busy.
     pub fn waiting_at_most(mut self, seconds: u64) -> Self {
         self.max_wait = seconds;
+        self
+    }
+
+    /// How many times to try one request before giving up on that album.
+    pub fn attempting_at_most(mut self, attempts: u32) -> Self {
+        self.max_attempts = attempts.max(1);
         self
     }
 
@@ -99,25 +126,45 @@ impl Http {
         query: &[(&str, &str)],
         headers: &[(&str, &str)],
     ) -> Result<Option<String>, LookupError> {
-        for retry in 0..=MAX_RATE_LIMIT_RETRIES {
+        // Two ways to fail, counted separately. Throttling is the server
+        // telling us to wait, and is answered by waiting. Everything else --
+        // a timeout, a refused connection, a 502 from a load balancer -- is
+        // transient by nature, and answered by trying again a little later.
+        let mut throttles = 0u32;
+        let mut attempts = 0u32;
+
+        loop {
             self.wait_for_the_rate_limit();
 
             let mut request = self.client.get(url).query(query);
             for (name, value) in headers {
                 request = request.header(*name, *value);
             }
+            attempts += 1;
             // The request is built out here but sent in there: reqwest arms
             // its timeout when the future is created, and a tokio timer can
             // only be created from inside the runtime.
-            let response = self
-                .runtime
-                .block_on(async move { request.send().await })
-                .map_err(|error| {
-                    LookupError::Album(format!("{} request failed: {error}", self.label))
-                })?;
+            let sent = self.runtime.block_on(async move { request.send().await });
+
+            let response = match sent {
+                Ok(response) => response,
+                Err(error) => {
+                    // A timeout or a dropped connection. Neither says anything
+                    // about the album, so it is worth asking again.
+                    if attempts >= self.max_attempts {
+                        return Err(self.gave_up(&format!(
+                            "{} request failed after {attempts} attempts: {error}",
+                            self.label
+                        )));
+                    }
+                    self.back_off(attempts, &format!("{error}"));
+                    continue;
+                }
+            };
 
             let status = response.status();
             if status == reqwest::StatusCode::NOT_FOUND {
+                self.succeeded();
                 return Ok(None);
             }
             // A token does not repair itself, so every remaining album would
@@ -129,17 +176,15 @@ impl Http {
                 )));
             }
 
-            let throttled = status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                || (self.forbidden_is_throttling && status == reqwest::StatusCode::FORBIDDEN);
-            if throttled {
-                if retry == MAX_RATE_LIMIT_RETRIES {
+            if self.is_throttling(status) {
+                throttles += 1;
+                if throttles > MAX_RATE_LIMIT_RETRIES {
                     return Err(LookupError::Exhausted(format!(
-                        "{} kept throttling the lookup after {} attempts",
-                        self.label,
-                        MAX_RATE_LIMIT_RETRIES + 1
+                        "{} kept throttling the lookup after {throttles} attempts",
+                        self.label
                     )));
                 }
-                let wait = retry_after(&response).unwrap_or(2 << retry).max(1);
+                let wait = retry_after(&response).unwrap_or(1 << throttles).max(1);
                 if wait > self.max_wait {
                     return Err(LookupError::Exhausted(format!(
                         "{} is rate limited for another {}, far past the {}-second limit \
@@ -153,8 +198,20 @@ impl Http {
                     "{} throttled the lookup; waiting {wait}s before retrying...",
                     self.label
                 );
-                self.runtime
-                    .block_on(async move { tokio::time::sleep(Duration::from_secs(wait)).await });
+                self.sleep(wait);
+                continue;
+            }
+
+            // A server error is the catalogue having a bad moment, not an
+            // answer about this album.
+            if status.is_server_error() {
+                if attempts >= self.max_attempts {
+                    return Err(self.gave_up(&format!(
+                        "{} answered HTTP {status} on all {attempts} attempts",
+                        self.label
+                    )));
+                }
+                self.back_off(attempts, &format!("HTTP {status}"));
                 continue;
             }
 
@@ -166,15 +223,59 @@ impl Http {
             }
 
             let body = response.text();
-            return self.runtime.block_on(body).map(Some).map_err(|error| {
+            let text = self.runtime.block_on(body).map_err(|error| {
                 LookupError::Album(format!(
                     "{} returned an unreadable response: {error}",
                     self.label
                 ))
-            });
+            })?;
+            self.succeeded();
+            return Ok(Some(text));
         }
+    }
 
-        unreachable!("the throttling loop always returns or continues")
+    /// Whether a status means "slow down" rather than "here is your answer".
+    ///
+    /// MusicBrainz answers a breached rate limit with 503 rather than 429, so
+    /// a plain reading of the status would file its throttling under "the
+    /// server is broken" and never wait at all.
+    fn is_throttling(&self, status: reqwest::StatusCode) -> bool {
+        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            || (self.forbidden_is_throttling && status == reqwest::StatusCode::FORBIDDEN)
+    }
+
+    /// Wait a little longer after each failed attempt, and say why.
+    fn back_off(&mut self, attempts: u32, reason: &str) {
+        let wait = (1u64 << attempts.min(6)).min(MAX_BACKOFF);
+        eprintln!(
+            "{} attempt {attempts} failed ({reason}); retrying in {wait}s...",
+            self.label
+        );
+        self.sleep(wait);
+    }
+
+    fn sleep(&self, seconds: u64) {
+        self.runtime
+            .block_on(async move { tokio::time::sleep(Duration::from_secs(seconds)).await });
+    }
+
+    /// Give up on one album, and on the source once enough have gone that way.
+    fn gave_up(&mut self, message: &str) -> LookupError {
+        self.consecutive_failures += 1;
+        if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+            return LookupError::Exhausted(format!(
+                "{message}. That is {} in a row, so {} is being treated as unreachable rather \
+                 than retried for every album left",
+                self.consecutive_failures, self.label
+            ));
+        }
+        LookupError::Album(message.to_owned())
+    }
+
+    /// A request got through, so the run of failures is over.
+    fn succeeded(&mut self) {
+        self.consecutive_failures = 0;
     }
 
     /// Sleep just long enough that the published request rate is respected.
@@ -426,5 +527,165 @@ mod tests {
         assert_eq!(readable(45), "45s");
         assert_eq!(readable(90), "1m 30s");
         assert_eq!(readable(19302), "5h 21m");
+    }
+
+    /// Retries are quick in a test, so the backoff does not dominate.
+    fn quick() -> Http {
+        Http::new("Test", "music-tag-transfer/test", Duration::from_millis(1))
+            .unwrap()
+            .attempting_at_most(3)
+    }
+
+    /// The failure that prompted this: MusicBrainz answers a breached rate
+    /// limit with 503, not 429. Read literally that is "the server is broken",
+    /// and the request would never wait at all.
+    #[test]
+    fn a_503_is_throttling_and_is_waited_out() {
+        let mut throttled = status("503 Service Unavailable", "");
+        throttled = throttled.replace("\r\nConnection:", "\r\nRetry-After: 1\r\nConnection:");
+        let server = Server::replying(&[throttled, ok(r#"{"answer":"waited"}"#)]);
+        let mut http = quick();
+
+        let body: Option<Body> = http.get_json(&server.address, &[], &[]).unwrap();
+
+        assert_eq!(
+            body,
+            Some(Body {
+                answer: "waited".to_owned()
+            })
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    /// A 500 is the catalogue having a bad moment, not an answer about this
+    /// album, so it is worth asking again.
+    #[test]
+    fn a_server_error_is_retried_and_then_succeeds() {
+        let server = Server::replying(&[
+            status("500 Internal Server Error", ""),
+            ok(r#"{"answer":"second time"}"#),
+        ]);
+        let mut http = quick();
+
+        let body: Option<Body> = http.get_json(&server.address, &[], &[]).unwrap();
+
+        assert_eq!(
+            body,
+            Some(Body {
+                answer: "second time".to_owned()
+            })
+        );
+        assert_eq!(server.requests().len(), 2);
+    }
+
+    /// After the attempts run out the album is given up on -- an Album error,
+    /// so the scan moves to the next album rather than ending the run.
+    #[test]
+    fn giving_up_on_one_album_does_not_end_the_run() {
+        let broken = status("502 Bad Gateway", "");
+        let server = Server::replying(&[broken.clone(), broken.clone(), broken]);
+        let mut http = quick();
+
+        let error = http
+            .get_json::<Body>(&server.address, &[], &[])
+            .expect_err("three server errors is enough");
+
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+        assert!(error.to_string().contains("all 3 attempts"), "{error}");
+        assert_eq!(server.requests().len(), 3);
+    }
+
+    /// A connection that is refused outright is the same kind of transient
+    /// failure as a timeout, and is retried the same way.
+    #[test]
+    fn an_unreachable_host_is_retried_then_given_up_on() {
+        // A port nothing is listening on: every attempt fails at connect.
+        let mut http = quick();
+        let error = http
+            .get_json::<Body>("http://127.0.0.1:1", &[], &[])
+            .expect_err("nothing is listening there");
+
+        assert!(error.to_string().contains("after 3 attempts"), "{error}");
+    }
+
+    /// One album failing says nothing; a run of them says the source is gone,
+    /// and grinding through a whole library at five attempts each would take
+    /// hours to discover that.
+    #[test]
+    fn a_run_of_failures_retires_the_source() {
+        let mut http = quick();
+        let mut last = None;
+        for _ in 0..MAX_CONSECUTIVE_FAILURES {
+            last = Some(
+                http.get_json::<Body>("http://127.0.0.1:1", &[], &[])
+                    .expect_err("nothing is listening there"),
+            );
+        }
+
+        let error = last.unwrap();
+        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        assert!(error.to_string().contains("in a row"), "{error}");
+    }
+
+    /// A success clears the count, so an occasional blip never accumulates
+    /// into a false verdict that the catalogue is down.
+    #[test]
+    fn a_success_forgives_the_earlier_failures() {
+        let mut http = quick();
+        for _ in 0..MAX_CONSECUTIVE_FAILURES - 1 {
+            let _ = http.get_json::<Body>("http://127.0.0.1:1", &[], &[]);
+        }
+
+        let server = Server::answering(&[r#"{"answer":"fine"}"#]);
+        assert!(
+            http.get_json::<Body>(&server.address, &[], &[])
+                .unwrap()
+                .is_some()
+        );
+        server.requests();
+
+        // Back to zero: the next failure is one album's problem, not the
+        // source's.
+        let error = http
+            .get_json::<Body>("http://127.0.0.1:1", &[], &[])
+            .expect_err("nothing is listening there");
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+    }
+
+    /// A 404 counts as a success for this purpose: the server answered.
+    #[test]
+    fn a_missing_document_also_clears_the_failure_count() {
+        let mut http = quick();
+        for _ in 0..MAX_CONSECUTIVE_FAILURES - 1 {
+            let _ = http.get_json::<Body>("http://127.0.0.1:1", &[], &[]);
+        }
+
+        let server = Server::replying(&[status("404 Not Found", "")]);
+        assert!(
+            http.get_json::<Body>(&server.address, &[], &[])
+                .unwrap()
+                .is_none()
+        );
+        server.requests();
+
+        let error = http
+            .get_json::<Body>("http://127.0.0.1:1", &[], &[])
+            .expect_err("nothing is listening there");
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+    }
+
+    /// A 4xx that is not throttling is a real answer about this request, and
+    /// retrying it would only waste the rate limit.
+    #[test]
+    fn a_client_error_is_not_retried() {
+        let server = Server::replying(&[status("400 Bad Request", "")]);
+        let mut http = quick();
+
+        let error = http
+            .get_json::<Body>(&server.address, &[], &[])
+            .expect_err("a 400 is an answer, not a blip");
+
+        assert!(matches!(error, LookupError::Album(_)), "{error}");
+        assert_eq!(server.requests().len(), 1);
     }
 }

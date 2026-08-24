@@ -730,6 +730,8 @@ music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missin
 | `--dry-run` | Report the same counts without writing any file |
 | `--csv PATH` | Write a before-and-after row for every file visited |
 | `--overwrite` | Let `--csv` replace an existing report |
+| `--max-attempts N` | How many times to try one request before giving up on that album (5 by default) |
+| `--max-wait SECONDS` | Longest rate-limit pause to sit through before setting a source aside (60 by default) |
 
 ### Choosing where the copyright comes from
 
@@ -937,6 +939,40 @@ album however many tracks it has.
 Misses and failures are printed as they happen and counted in the summary, and
 the summary names the other sources, since an album missing from one catalogue
 is often complete in another.
+
+### When a request fails
+
+A request can fail for two quite different reasons, and they are answered
+differently.
+
+**The server says slow down.** A `429`, or a `503` — which is how MusicBrainz
+signals a breached rate limit rather than the `429` you might expect — is
+waited out, honouring `Retry-After`. A pause longer than `--max-wait` means the
+catalogue is telling you to come back another day, so that source is set aside
+for the rest of the run rather than asked again.
+
+**Something went wrong in transit.** A timeout, a dropped connection, a `500`
+or a `502` says nothing about the album, so the request is simply tried again
+after a growing pause — 2s, 4s, 8s, up to 30s — `--max-attempts` times. After
+that the album is given up on and the scan moves to the next one; nothing is
+written and the file keeps whatever it had.
+
+Both are visible while the run works:
+
+```text
+iTunes attempt 1 failed (operation timed out); retrying in 2s...
+iTunes attempt 2 failed (operation timed out); retrying in 4s...
+Daft Punk - Discovery: the lookup failed (iTunes request failed after 3 attempts: ...); left unchanged.
+```
+
+One album failing says nothing about the next. **Three in a row** says the
+network is down or the catalogue is refusing everyone, so the source is treated
+as unreachable at that point — otherwise a whole library would grind through
+five attempts each to discover the same thing hours later. A single success
+clears the count, so an occasional blip never accumulates into a false verdict.
+
+All of this lives in one place and applies to every request each source makes,
+searches and detail fetches alike.
 
 ### One request per album
 

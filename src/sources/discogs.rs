@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::AlbumEvidence;
 use crate::sources::{
+    Limits,
     http::Http,
     naming::{Agreement, Score, confidence, copyright_line},
 };
@@ -87,7 +88,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(token: &str, max_wait: u64) -> Result<Self, String> {
+    pub fn new(token: &str, limits: Limits) -> Result<Self, String> {
         let token = token.trim();
         if token.is_empty() {
             return Err("the Discogs token is empty".to_owned());
@@ -99,7 +100,9 @@ impl Client {
             " +https://github.com/raina3266/music_organiser"
         );
         Ok(Self {
-            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
+            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?
+                .waiting_at_most(limits.max_wait)
+                .attempting_at_most(limits.max_attempts),
             // Discogs takes the token in a header rather than the query
             // string, which keeps it out of any proxy's access log.
             token: format!("Discogs token={token}"),
@@ -243,7 +246,7 @@ fn year_of(release: &Release) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
+    use crate::sources::{Limits, testing::Server};
 
     fn wanting(artist: &str, album: &str) -> AlbumEvidence {
         AlbumEvidence {
@@ -330,7 +333,7 @@ mod tests {
 
     #[test]
     fn a_token_is_required() {
-        assert!(Client::new("   ", DEFAULT_MAX_WAIT).is_err());
+        assert!(Client::new("   ", Limits::default()).is_err());
     }
 
     /// The search, then each candidate in turn — a search result carries no

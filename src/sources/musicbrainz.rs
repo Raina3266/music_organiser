@@ -20,6 +20,7 @@ use serde::Deserialize;
 
 use crate::AlbumEvidence;
 use crate::sources::{
+    Limits,
     http::Http,
     naming::{Score, confidence, copyright_line, year_of},
 };
@@ -94,7 +95,7 @@ pub struct Client {
 
 impl Client {
     /// `contact` is the email address or URL to advertise in the User-Agent.
-    pub fn new(contact: Option<&str>, max_wait: u64) -> Result<Self, String> {
+    pub fn new(contact: Option<&str>, limits: Limits) -> Result<Self, String> {
         let contact = contact
             .map(str::trim)
             .filter(|contact| !contact.is_empty())
@@ -105,7 +106,9 @@ impl Client {
             env!("CARGO_PKG_VERSION")
         );
         Ok(Self {
-            http: Http::new(LABEL, &user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
+            http: Http::new(LABEL, &user_agent, MIN_INTERVAL)?
+                .waiting_at_most(limits.max_wait)
+                .attempting_at_most(limits.max_attempts),
             releases: SEARCH_URL.to_owned(),
             albums: HashMap::new(),
         })

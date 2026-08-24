@@ -15,7 +15,28 @@ pub mod musicbrainz;
 pub mod naming;
 pub mod spotify;
 
-pub use http::DEFAULT_MAX_WAIT;
+pub use http::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_WAIT};
+
+/// How hard a run tries before giving up, on one request and on one source.
+///
+/// Grouped rather than passed one by one because every source needs both and
+/// the list was only going to grow.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct Limits {
+    /// Longest rate-limit wait to sit through before a source is spent.
+    pub max_wait: u64,
+    /// How many times to try one request before giving up on that album.
+    pub max_attempts: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_wait: DEFAULT_MAX_WAIT,
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+        }
+    }
+}
 #[cfg(test)]
 mod testing;
 
@@ -180,23 +201,23 @@ impl Source {
     ///
     /// `credential` is the token or contact address the source needs;
     /// [`Source::requirement`] says which, and whether it may be `None`.
-    /// `max_wait` is the longest rate-limit pause to sit through before
-    /// treating this source as spent for the rest of the run.
+    /// `limits` says how hard to try before giving up on a request and on the
+    /// source itself.
     pub fn open(
         self,
         credential: Option<&str>,
-        max_wait: u64,
+        limits: Limits,
     ) -> Result<Box<dyn CopyrightLookup>, String> {
         match self {
-            Source::Itunes => Ok(Box::new(itunes::Client::new(max_wait)?)),
-            Source::MusicBrainz => Ok(Box::new(musicbrainz::Client::new(credential, max_wait)?)),
+            Source::Itunes => Ok(Box::new(itunes::Client::new(limits)?)),
+            Source::MusicBrainz => Ok(Box::new(musicbrainz::Client::new(credential, limits)?)),
             Source::Discogs => Ok(Box::new(discogs::Client::new(
                 credential.ok_or_else(|| self.missing_credential())?,
-                max_wait,
+                limits,
             )?)),
             Source::Spotify => Ok(Box::new(spotify::Client::new(
                 credential.ok_or_else(|| self.missing_credential())?,
-                max_wait,
+                limits,
             )?)),
         }
     }
@@ -239,14 +260,14 @@ impl Chain {
     pub fn open(
         sources: &[Source],
         credentials: &[Option<String>],
-        max_wait: u64,
+        limits: Limits,
     ) -> Result<Self, String> {
         let mut links = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
             let credential = credentials.get(index).and_then(Option::as_deref);
             links.push(Link {
                 source: *source,
-                lookup: source.open(credential, max_wait)?,
+                lookup: source.open(credential, limits)?,
                 answering: true,
                 hits: 0,
             });
@@ -489,7 +510,7 @@ mod tests {
             (Source::Discogs, discogs::TOKEN_VARIABLE),
             (Source::Spotify, spotify::TOKEN_VARIABLE),
         ] {
-            let Err(error) = source.open(None, DEFAULT_MAX_WAIT) else {
+            let Err(error) = source.open(None, Limits::default()) else {
                 panic!("{} opened without a token", source.title());
             };
             assert!(error.contains(variable));

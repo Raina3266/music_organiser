@@ -3,7 +3,7 @@ use std::{collections::HashSet, ffi::OsString, path::PathBuf};
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
 use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
-use crate::sources::{DEFAULT_MAX_WAIT, Source};
+use crate::sources::{Limits, Source};
 
 pub const HELP: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -90,6 +90,13 @@ A file is written only when a copyright was found: a lookup that matches
 nothing, a lookup that fails, and a file naming no album all leave that file
 exactly as it was. --only-missing skips files that already carry a message.
 
+A request that times out or hits a server error is retried with a growing
+pause between attempts, --max-attempts times (5 by default) before that album
+is given up on and the scan moves to the next. A source that gives up three
+albums in a row is treated as unreachable rather than retried for every
+remaining album. --max-wait caps how long a rate-limit pause may be before a
+source is set aside.
+
 --csv PATH writes one row per file showing what it held, what the run would
 write, and what became of it. With --dry-run that is a preview to read before
 letting a real run touch anything; without it, a record of what was written.
@@ -132,9 +139,8 @@ pub enum Command {
         csv: Option<PathBuf>,
         /// Whether that report may replace an existing file.
         overwrite: bool,
-        /// Longest rate-limit wait to sit through before giving up on a
-        /// source, in seconds.
-        max_wait: u64,
+        /// How hard to try before giving up on a request and on a source.
+        limits: Limits,
     },
     Help,
     Version,
@@ -246,7 +252,7 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     let mut dry_run = false;
     let mut csv = None;
     let mut overwrite = false;
-    let mut max_wait = DEFAULT_MAX_WAIT;
+    let mut limits = Limits::default();
 
     let mut index = 0;
     while index < args.len() {
@@ -262,9 +268,18 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
                 )?)?);
             }
             "--max-wait" => {
-                max_wait = next_value(args, &mut index, "--max-wait")?
+                limits.max_wait = next_value(args, &mut index, "--max-wait")?
                     .parse()
                     .map_err(|_| "--max-wait expects a number of seconds".to_owned())?;
+            }
+            "--max-attempts" => {
+                let attempts: u32 = next_value(args, &mut index, "--max-attempts")?
+                    .parse()
+                    .map_err(|_| "--max-attempts expects a number".to_owned())?;
+                if attempts == 0 {
+                    return Err("--max-attempts must be at least 1".to_owned());
+                }
+                limits.max_attempts = attempts;
             }
             "--token" => token = Some(next_value(args, &mut index, "--token")?),
             "--token-file" => {
@@ -309,7 +324,7 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
         dry_run,
         csv,
         overwrite,
-        max_wait,
+        limits,
     })
 }
 
@@ -462,7 +477,7 @@ mod tests {
                 dry_run: true,
                 csv: None,
                 overwrite: false,
-                max_wait: DEFAULT_MAX_WAIT,
+                limits: Limits::default(),
             }
         );
         // No --source is not a default: it is the question left unanswered,
@@ -478,7 +493,7 @@ mod tests {
                 dry_run: false,
                 csv: None,
                 overwrite: false,
-                max_wait: DEFAULT_MAX_WAIT,
+                limits: Limits::default(),
             }
         );
         assert!(parse_args(strings(&["copyright"])).is_err());
@@ -506,7 +521,7 @@ mod tests {
                 dry_run: false,
                 csv: None,
                 overwrite: false,
-                max_wait: DEFAULT_MAX_WAIT,
+                limits: Limits::default(),
             }
         );
         // The --option=value spelling works too, and so do the short names.
@@ -521,7 +536,7 @@ mod tests {
                 dry_run: false,
                 csv: None,
                 overwrite: false,
-                max_wait: DEFAULT_MAX_WAIT,
+                limits: Limits::default(),
             }
         );
     }

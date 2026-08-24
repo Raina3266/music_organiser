@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::AlbumEvidence;
 use crate::sources::{
+    Limits,
     http::Http,
     naming::{Score, confidence},
 };
@@ -57,12 +58,13 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(max_wait: u64) -> Result<Self, String> {
+    pub fn new(limits: Limits) -> Result<Self, String> {
         let user_agent = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         Ok(Self {
             http: Http::new("iTunes", user_agent, MIN_INTERVAL)?
                 .forbidden_is_throttling()
-                .waiting_at_most(max_wait),
+                .waiting_at_most(limits.max_wait)
+                .attempting_at_most(limits.max_attempts),
             albums: HashMap::new(),
         })
     }

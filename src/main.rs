@@ -3,7 +3,7 @@ use std::{env, process::ExitCode};
 use music_tag_transfer::{
     cli::{Command, HELP, parse_args},
     delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights,
-    sources::{Chain, Source, menu},
+    sources::{Chain, Limits, Source, menu},
     write_change_report,
 };
 
@@ -82,7 +82,7 @@ fn run() -> Result<ExitCode, String> {
             dry_run,
             csv,
             overwrite,
-            max_wait,
+            limits,
         } => {
             let interactive = menu::interactive();
             // Nobody has chosen yet: ask if there is anyone to ask, and
@@ -111,16 +111,18 @@ fn run() -> Result<ExitCode, String> {
                 )?);
             }
 
-            let mut chain = Chain::open(&sources, &credentials, max_wait)?;
+            let mut chain = Chain::open(&sources, &credentials, limits)?;
             let names = sources
                 .iter()
                 .map(|source| source.title())
                 .collect::<Vec<_>>()
                 .join(", then ");
             println!("Looking copyrights up in {names}.");
-            if max_wait != music_tag_transfer::sources::DEFAULT_MAX_WAIT {
+            if limits != Limits::default() {
                 println!(
-                    "Waiting out a rate limit of up to {max_wait}s before giving up on a source."
+                    "Trying each request up to {} time(s), and waiting out a rate limit of up \
+                     to {}s before setting a source aside.",
+                    limits.max_attempts, limits.max_wait
                 );
             }
 

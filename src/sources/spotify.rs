@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::AlbumEvidence;
 use crate::sources::{
+    Limits,
     http::Http,
     naming::{Score, confidence},
 };
@@ -103,14 +104,16 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(token: &str, max_wait: u64) -> Result<Self, String> {
+    pub fn new(token: &str, limits: Limits) -> Result<Self, String> {
         let token = token.trim();
         if token.is_empty() {
             return Err("the Spotify access token is empty".to_owned());
         }
         let user_agent = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
         Ok(Self {
-            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?.waiting_at_most(max_wait),
+            http: Http::new(LABEL, user_agent, MIN_INTERVAL)?
+                .waiting_at_most(limits.max_wait)
+                .attempting_at_most(limits.max_attempts),
             authorization: format!("Bearer {token}"),
             search: SEARCH_URL.to_owned(),
             album_url: ALBUM_URL.to_owned(),
@@ -312,7 +315,7 @@ fn quote_for_search(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sources::{DEFAULT_MAX_WAIT, testing::Server};
+    use crate::sources::{Limits, testing::Server};
 
     fn wanting(artist: &str, album: &str) -> AlbumEvidence {
         AlbumEvidence {
@@ -405,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_token_is_required() {
-        assert!(Client::new("  ", DEFAULT_MAX_WAIT).is_err());
+        assert!(Client::new("  ", Limits::default()).is_err());
     }
 
     /// The search answers with a simplified album that has no copyrights, so

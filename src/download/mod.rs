@@ -9,7 +9,7 @@ use self::input::Entry;
 use self::spotdl::Classification;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
-use crate::sources::{DEFAULT_MAX_WAIT, itunes::Client as ItunesClient};
+use crate::sources::{Limits, itunes::Client as ItunesClient};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -100,7 +100,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         None
     } else {
         println!("Copyright will be looked up per album through the iTunes Search API.");
-        Some(ItunesClient::new(DEFAULT_MAX_WAIT)?)
+        Some(ItunesClient::new(Limits::default())?)
     };
     let total = input.entries.len();
     let mut completed = 0usize;
