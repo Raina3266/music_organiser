@@ -93,6 +93,12 @@ exactly as it was. --only-missing skips files that already carry a message.
 A throttled request is waited out and retried --max-throttle-retries times
 (30 by default); running out of those skips that album and the scan carries
 on, since throttling passes and the next album will very likely go through.
+A source that says the requests are coming too often also has the gap between
+them widened -- doubled each time it refuses, up to ten seconds, and eased
+back once ten requests have got through -- so the next album is not sent at
+the rate that was just refused. MusicBrainz in particular answers a breached
+rate limit with 503, and at a busy hour it can refuse a rate it accepted
+earlier in the same run.
 A request that times out or hits a server error is retried with a growing
 pause, --max-attempts times (5 by default), before that album is likewise
 skipped.
@@ -100,7 +106,7 @@ skipped.
 The scan always visits every file. A source is only ever set aside -- stopped
 being asked, while the run continues -- when it asks for a wait longer than
 --max-wait, when its token is rejected, or when three albums in a row cannot
-reach it at all.
+reach it at all or never get through its throttling.
 
 --csv PATH writes one row per file showing what it held, what the run would
 write, and what became of it. With --dry-run that is a preview to read before

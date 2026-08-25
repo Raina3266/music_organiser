@@ -31,6 +31,21 @@ pub const DEFAULT_MAX_WAIT: u64 = 60;
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Longest backoff between attempts at a request that keeps failing.
 const MAX_BACKOFF: u64 = 30;
+/// Longest gap the pacing may widen to while a source keeps saying the
+/// requests are coming too often.
+///
+/// A published rate limit is an average, not a promise: a catalogue that is
+/// busy, or that is being asked by somebody else sharing this address, starts
+/// refusing at a rate it accepted an hour ago. Ten seconds is slow enough to
+/// be let back in and still finish a library overnight.
+const MAX_INTERVAL: Duration = Duration::from_secs(10);
+/// How many requests must get through cleanly before the widened pacing eases
+/// back toward the published rate.
+///
+/// Slow to widen and slower to narrow: the cost of being a little too polite
+/// is a longer scan, and the cost of being too quick is the throttling
+/// starting over.
+const REQUESTS_BEFORE_EASING_OFF: u32 = 10;
 /// How many albums may give up in a row before the source is presumed
 /// unreachable.
 ///
@@ -45,8 +60,14 @@ pub struct Http {
     label: &'static str,
     runtime: tokio::runtime::Runtime,
     client: reqwest::Client,
-    /// Smallest gap to leave between two requests.
+    /// The gap the source publishes as its rate limit, and the floor the
+    /// pacing eases back to.
+    base_interval: Duration,
+    /// Smallest gap to leave between two requests right now. It widens while
+    /// the source is throttling and narrows again once requests get through.
     min_interval: Duration,
+    /// Requests that have got through since the pacing last widened.
+    clean_requests: u32,
     last_request: Option<Instant>,
     /// Whether a 403 means "slow down" rather than "not allowed".
     forbidden_is_throttling: bool,
@@ -79,7 +100,9 @@ impl Http {
             label,
             runtime,
             client,
+            base_interval: min_interval,
             min_interval,
+            clean_requests: 0,
             last_request: None,
             forbidden_is_throttling: false,
             max_wait: DEFAULT_MAX_WAIT,
@@ -106,6 +129,13 @@ impl Http {
     pub fn waiting_out_throttling(mut self, retries: u32) -> Self {
         self.max_throttle_retries = retries.max(1);
         self
+    }
+
+    /// The gap currently being left between requests, which widens while a
+    /// source is throttling.
+    #[cfg(test)]
+    fn pacing(&self) -> Duration {
+        self.min_interval
     }
 
     /// Treat a 403 as throttling. The iTunes Search API answers 403 as well as
@@ -193,12 +223,23 @@ impl Http {
 
             if self.is_throttling(status) {
                 throttles += 1;
+                // Waiting out this one request is not enough on its own: the
+                // next request would go out at the same rate and be refused
+                // the same way, which is how one throttled album turns into a
+                // whole library of them. So the pacing itself widens, and
+                // stays widened until requests are getting through again.
+                self.slow_down();
                 // Running out of patience with one album says nothing about
                 // the next: throttling passes, and the album after this one
                 // will very likely go through. So this gives up on the album
                 // and leaves the source in play.
                 if throttles > self.max_throttle_retries {
-                    return Err(LookupError::Album(format!(
+                    // Counted with the other ways an album can be lost: one
+                    // album that never gets through says the catalogue was
+                    // busy, but three in a row say it is refusing this run
+                    // outright, and spending thirty waits per album to
+                    // rediscover that for the rest of a library takes hours.
+                    return Err(self.gave_up(&format!(
                         "{} kept throttling through all {} retries",
                         self.label, self.max_throttle_retries
                     )));
@@ -301,9 +342,50 @@ impl Http {
     /// A request got through, so the run of failures is over.
     fn succeeded(&mut self) {
         self.consecutive_failures = 0;
+        self.ease_off_the_pacing();
     }
 
-    /// Sleep just long enough that the published request rate is respected.
+    /// Leave more room between requests, because the server has just said
+    /// they are coming too often.
+    ///
+    /// Doubling rather than nudging: a source that is refusing at this rate is
+    /// unlikely to accept a rate a hair below it, and every guess costs
+    /// another refused request.
+    fn slow_down(&mut self) {
+        self.clean_requests = 0;
+        if self.min_interval >= MAX_INTERVAL {
+            return;
+        }
+        self.min_interval = (self.min_interval * 2).min(MAX_INTERVAL);
+        eprintln!(
+            "{} is refusing requests at this rate; spacing them {} apart from here on.",
+            self.label,
+            gap(self.min_interval),
+        );
+    }
+
+    /// Give the pacing back once requests are getting through, so a busy
+    /// minute early in a scan does not slow the rest of it to a crawl.
+    fn ease_off_the_pacing(&mut self) {
+        if self.min_interval <= self.base_interval {
+            return;
+        }
+        self.clean_requests += 1;
+        if self.clean_requests < REQUESTS_BEFORE_EASING_OFF {
+            return;
+        }
+        self.clean_requests = 0;
+        self.min_interval = (self.min_interval / 2).max(self.base_interval);
+        eprintln!(
+            "{} is answering again; easing the spacing back to {}.",
+            self.label,
+            gap(self.min_interval),
+        );
+    }
+
+    /// Sleep just long enough that the rate currently being kept to is
+    /// respected: the source's published one, or the wider gap the throttling
+    /// has forced.
     fn wait_for_the_rate_limit(&mut self) {
         if let Some(last) = self.last_request {
             let elapsed = last.elapsed();
@@ -314,6 +396,16 @@ impl Http {
             }
         }
         self.last_request = Some(Instant::now());
+    }
+}
+
+/// A gap between requests, in the units a person thinks in. Sub-second gaps
+/// are the normal case for these APIs, so they are spelled in milliseconds.
+fn gap(interval: Duration) -> String {
+    if interval < Duration::from_secs(1) {
+        format!("{}ms", interval.as_millis())
+    } else {
+        format!("{:.1}s", interval.as_secs_f64())
     }
 }
 
@@ -700,6 +792,120 @@ mod tests {
             .get_json::<Body>("http://127.0.0.1:1", &[], &[])
             .expect_err("nothing is listening there");
         assert!(matches!(error, LookupError::Album(_)), "{error}");
+    }
+
+    /// A response that says "too often", spelled the way MusicBrainz spells
+    /// it.
+    fn throttled() -> String {
+        status("503 Service Unavailable", "")
+            .replace("\r\nConnection:", "\r\nRetry-After: 1\r\nConnection:")
+    }
+
+    /// The failure this was written for: MusicBrainz refuses at the rate the
+    /// scan is asking, and waiting out each refused request one at a time
+    /// walks straight back into the limit with the very next album. The gap
+    /// between requests has to widen too.
+    #[test]
+    fn throttling_widens_the_gap_between_the_requests_that_follow() {
+        let server = Server::replying(&[
+            throttled(),
+            ok(r#"{"answer":"waited"}"#),
+            ok(r#"{"answer":"and again"}"#),
+        ]);
+        let mut http = Http::new(
+            "Test",
+            "music-tag-transfer/test",
+            Duration::from_millis(200),
+        )
+        .unwrap();
+
+        http.get_json::<Body>(&server.address, &[], &[]).unwrap();
+        assert_eq!(http.pacing(), Duration::from_millis(400));
+
+        // And the widened gap is actually left, rather than only recorded.
+        let started = Instant::now();
+        http.get_json::<Body>(&server.address, &[], &[]).unwrap();
+        assert!(
+            started.elapsed() >= Duration::from_millis(400),
+            "the next request went out at the rate that was just refused"
+        );
+        server.requests();
+    }
+
+    /// A busy minute early in a scan must not slow the rest of it to a crawl,
+    /// so the gap is given back once requests are getting through.
+    #[test]
+    fn the_pacing_eases_back_once_requests_are_getting_through() {
+        let mut responses = vec![throttled()];
+        responses.extend(std::iter::repeat_n(
+            ok(r#"{"answer":"fine"}"#),
+            REQUESTS_BEFORE_EASING_OFF as usize,
+        ));
+        let server = Server::replying(&responses);
+        let mut http =
+            Http::new("Test", "music-tag-transfer/test", Duration::from_millis(4)).unwrap();
+
+        // The first call is refused once, waits, and then gets through: the
+        // gap doubles, and that success is the first clean request.
+        http.get_json::<Body>(&server.address, &[], &[]).unwrap();
+        assert_eq!(http.pacing(), Duration::from_millis(8));
+
+        for _ in 1..REQUESTS_BEFORE_EASING_OFF {
+            http.get_json::<Body>(&server.address, &[], &[]).unwrap();
+        }
+
+        assert_eq!(http.pacing(), Duration::from_millis(4));
+        server.requests();
+    }
+
+    /// The gap only ever widens so far. A source that refuses everything must
+    /// not push the scan into ten-minute waits between albums.
+    #[test]
+    fn the_widened_gap_stops_at_a_ceiling() {
+        let mut http = Http::new(
+            "Test",
+            "music-tag-transfer/test",
+            Duration::from_millis(1_100),
+        )
+        .unwrap();
+        for _ in 0..20 {
+            http.slow_down();
+        }
+        assert_eq!(http.pacing(), MAX_INTERVAL);
+    }
+
+    /// One album that never gets through says the catalogue was busy; three in
+    /// a row say it is refusing this run, and thirty waits per album for the
+    /// rest of a library would take hours to say so.
+    #[test]
+    fn albums_that_never_get_through_eventually_retire_the_source() {
+        // Two refusals per call: the first is waited out, the second runs the
+        // single retry out.
+        let mut responses = Vec::new();
+        for _ in 0..MAX_CONSECUTIVE_FAILURES * 2 {
+            responses.push(throttled());
+        }
+        let server = Server::replying(&responses);
+        let mut http = client().waiting_out_throttling(1);
+
+        let mut last = None;
+        for _ in 0..MAX_CONSECUTIVE_FAILURES {
+            last = Some(
+                http.get_json::<Body>(&server.address, &[], &[])
+                    .expect_err("it never stopped refusing"),
+            );
+        }
+
+        let error = last.unwrap();
+        assert!(matches!(error, LookupError::Exhausted(_)), "{error}");
+        assert!(error.to_string().contains("in a row"), "{error}");
+        server.requests();
+    }
+
+    #[test]
+    fn spells_a_gap_in_the_units_a_person_thinks_in() {
+        assert_eq!(gap(Duration::from_millis(1_100)), "1.1s");
+        assert_eq!(gap(Duration::from_millis(300)), "300ms");
     }
 
     /// A 4xx that is not throttling is a real answer about this request, and

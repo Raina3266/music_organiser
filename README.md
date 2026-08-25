@@ -975,6 +975,29 @@ times (**30** by default). Running out of those skips that album and the scan
 carries on: throttling passes, and the album after this one will very likely
 go through, so one album's bad luck is never a reason to stop.
 
+Waiting out the one refused request is not enough on its own, though. The next
+request would go out at the same rate and be refused the same way, which is how
+one throttled album turns into a screenful of them:
+
+```text
+MusicBrainz lookup failed (HTTP 503 Service Unavailable)
+MusicBrainz lookup failed (HTTP 503 Service Unavailable)
+MusicBrainz lookup failed (HTTP 503 Service Unavailable)
+```
+
+So the **pacing itself widens**. Every refusal doubles the gap the run leaves
+between requests, up to ten seconds, and ten requests getting through cleanly
+halve it again, down to the rate the catalogue publishes. A published limit is
+an average rather than a promise — MusicBrainz allows roughly one request a
+second, but a busy hour, or somebody else sharing your address, can see it
+refuse a rate it accepted earlier in the same run — and this finds the rate
+that is actually being accepted instead of insisting on the documented one:
+
+```text
+MusicBrainz is refusing requests at this rate; spacing them 2.2s apart from here on.
+MusicBrainz is answering again; easing the spacing back to 1.1s.
+```
+
 The exception is a `Retry-After` measured in hours. No number of retries
 shortens that, so the source is **set aside** — stopped being asked — while
 the run itself continues to the end.
@@ -993,9 +1016,10 @@ iTunes attempt 2 failed (operation timed out); retrying in 4s...
 Daft Punk - Discovery: the lookup failed (iTunes request failed after 3 attempts: ...); left unchanged.
 ```
 
-One album failing says nothing about the next. **Three in a row** says the
-network is down or the catalogue is refusing everyone, so the source is set
-aside at that point — otherwise a whole library would grind through five
+One album failing says nothing about the next. **Three in a row** — whether
+they could not reach the catalogue at all or never got through its throttling
+— says the network is down or the catalogue is refusing everyone, so the
+source is set aside at that point — otherwise a whole library would grind through five
 attempts each to discover the same thing hours later. A single success clears
 the count, so an occasional blip never accumulates into a false verdict.
 
