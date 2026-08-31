@@ -166,7 +166,8 @@ pub(super) fn download(
 /// Build `spotdl ... download "YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL"`.
 ///
 /// The pair is passed as a single argument; spotDL reads the part before `|`
-/// as the audio source and the part after it as the metadata source.
+/// as the audio source and the part after it as the metadata source, so the
+/// input parser has already put the two URLs in that order.
 fn download_command(
     program: &str,
     output_dir: &Path,

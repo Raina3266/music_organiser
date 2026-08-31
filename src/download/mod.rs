@@ -28,8 +28,8 @@ const MAX_TOKEN_PROMPTS: u32 = 3;
 /// copyright, and paste cleaned `.lrc` text into the ordinary USLT frame.
 ///
 /// A line is a Spotify URL, a YouTube Music URL, or a
-/// `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pair, and the three may
-/// be mixed freely in one file.
+/// `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pair (the pair may also
+/// be written Spotify first), and the three may be mixed freely in one file.
 ///
 /// A return value of `0` means every line downloaded and had its metadata
 /// applied; `1` means a retry list was written for failed or unattempted

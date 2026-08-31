@@ -92,8 +92,9 @@ cargo run -- download links.txt
 
 `download` reads one link per line, so the fastest path is to paste the links
 you want into a text file. Spotify links, YouTube Music links, and
-`YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pairs can be mixed freely in
-the same file.
+`YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pairs — which may also be
+written `SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL` — can be mixed freely in the same
+file.
 
 1. Create `links.txt`:
 
@@ -172,9 +173,10 @@ spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
 https://music.youtube.com/watch?v=9bZkp7q19f0
 https://youtu.be/dQw4w9WgXcQ
 
-# 3. an exact-source pair
+# 3. an exact-source pair, in either order
 https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql
 https://youtu.be/9bZkp7q19f0|spotify:track:02Q0SXOsk74oV4hesiL6JW
+https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql|https://music.youtube.com/watch?v=dQw4w9WgXcQ
 ```
 
 Each form leaves a different part of the job to spotDL's own search:
@@ -183,10 +185,12 @@ Each form leaves a different part of the job to spotDL's own search:
 |---|---|---|
 | Spotify link | searched on YouTube by spotDL | pinned by the link |
 | YouTube link | pinned by the link | searched on Spotify by spotDL |
-| `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` | pinned by the left URL | pinned by the right URL |
+| `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` | pinned by the YouTube URL | pinned by the Spotify URL |
 
 The pair is spotDL's exact-source syntax, and it is the only form in which
-nothing at all is left to a search.
+nothing at all is left to a search. The two halves may be written in either
+order — `SPOTIFY_TRACK_URL\|YOUTUBE_MUSIC_URL` is accepted too, and is
+rewritten into the order spotDL expects.
 
 **Spotify links** may be `open.spotify.com` URLs or `spotify:` URIs, and may
 name a **track**, an **album**, or a **playlist**; an album or playlist link
@@ -199,13 +203,15 @@ URLs are rejected — the last because a shortened link is never resolved.
 supported; short `youtu.be/ID` links are expanded to
 `https://www.youtube.com/watch?v=ID`.
 
-The right-hand side of a **pair** must be a Spotify track, because a pair
-describes exactly one track.
+The Spotify half of a **pair** must be a track, because a pair describes
+exactly one track, and the two halves must name different services: two
+Spotify URLs or two YouTube URLs are rejected.
 
 Query strings and fragments are removed, so tracking parameters such as `si=`
 do not create duplicates. Duplicate normalized lines are downloaded only once;
 a pair and a bare Spotify track link are different downloads even when they
-name the same track, because they resolve the audio differently. If any
+name the same track, because they resolve the audio differently; the same pair
+written in both orders is one download. If any
 non-comment line is invalid, the command reports up to ten invalid lines and
 stops before starting spotDL.
 

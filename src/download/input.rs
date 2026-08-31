@@ -11,7 +11,8 @@ pub(super) const PAIR_SEPARATOR: char = '|';
 ///
 /// * `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` is spotDL's exact-source syntax:
 ///   the YouTube Music URL pins the audio and the Spotify track URL supplies
-///   the metadata, so neither side is searched.
+///   the metadata, so neither side is searched. The two URLs may be written in
+///   either order; the pair is normalized to the order spotDL expects.
 /// * a Spotify URL on its own pins the metadata; spotDL searches YouTube for
 ///   the audio.
 /// * a YouTube Music URL on its own pins the audio; spotDL searches Spotify
@@ -160,7 +161,7 @@ fn parse(contents: &str) -> Result<InputList, String> {
             format!("\n... and {remainder} more invalid line(s)")
         };
         return Err(format!(
-            "invalid input:\n{shown}{suffix}\n\nEach line must be a SPOTIFY_URL, a YOUTUBE_MUSIC_URL, or a YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL pair."
+            "invalid input:\n{shown}{suffix}\n\nEach line must be a SPOTIFY_URL, a YOUTUBE_MUSIC_URL, or a YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL (or SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL) pair."
         ));
     }
     if entries.is_empty() {
@@ -188,7 +189,10 @@ fn normalize_line(raw: &str) -> Result<Normalized, String> {
     }
 }
 
-/// Validate one `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` line.
+/// Validate one pair line, written in either order.
+///
+/// spotDL only reads `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL`, so a line that
+/// names the Spotify track first is accepted and swapped back into that order.
 fn normalize_pair(raw: &str) -> Result<Normalized, String> {
     let separators = raw.matches(PAIR_SEPARATOR).count();
     if separators > 1 {
@@ -197,17 +201,28 @@ fn normalize_pair(raw: &str) -> Result<Normalized, String> {
         ));
     }
 
-    let (youtube, spotify) = raw
+    let (left, right) = raw
         .split_once(PAIR_SEPARATOR)
         .expect("a single separator was just counted");
-    let youtube = youtube.trim();
-    if youtube.is_empty() {
-        return Err("the YouTube Music URL is missing before '|'".into());
+    let left = left.trim();
+    if left.is_empty() {
+        return Err("the URL before '|' is missing".into());
     }
-    let spotify = spotify.trim();
-    if spotify.is_empty() {
-        return Err("the Spotify track URL is missing after '|'".into());
+    let right = right.trim();
+    if right.is_empty() {
+        return Err("the URL after '|' is missing".into());
     }
+
+    let (youtube, spotify) = match (service_of(left)?, service_of(right)?) {
+        (Service::YouTube, Service::Spotify) => (left, right),
+        (Service::Spotify, Service::YouTube) => (right, left),
+        (Service::YouTube, Service::YouTube) => {
+            return Err("both sides of the pair are YouTube URLs; a pair needs one YouTube Music URL and one Spotify track URL".into());
+        }
+        (Service::Spotify, Service::Spotify) => {
+            return Err("both sides of the pair are Spotify URLs; a pair needs one YouTube Music URL and one Spotify track URL".into());
+        }
+    };
 
     let youtube = normalize_youtube_url(youtube)?;
     let track_id = spotify_track_id(spotify)?;
@@ -379,7 +394,7 @@ fn spotify_track_id(raw: &str) -> Result<String, String> {
     let link = spotify_link(raw)?;
     if link.kind != SpotifyKind::Track {
         return Err(format!(
-            "the right-hand side must be a Spotify track URL, not a {} URL",
+            "the Spotify half of a pair must be a track URL, not a {} URL",
             link.kind.path()
         ));
     }
@@ -466,6 +481,49 @@ mod tests {
         .unwrap();
         assert_eq!(pair.query, PAIR);
         assert_eq!(pair.source.track_id(), Some("02Q0SXOsk74oV4hesiL6JW"));
+    }
+
+    #[test]
+    fn accepts_a_pair_written_spotify_first() {
+        let pair = normalize_line(
+            "https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW?si=1|https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+        )
+        .unwrap();
+        assert_eq!(pair.query, PAIR);
+        assert_eq!(pair.source.track_id(), Some("02Q0SXOsk74oV4hesiL6JW"));
+
+        assert_eq!(
+            query_of_line("spotify:track:02Q0SXOsk74oV4hesiL6JW|https://youtu.be/dQw4w9WgXcQ?t=30"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW"
+        );
+    }
+
+    #[test]
+    fn a_pair_names_the_same_download_in_either_order() {
+        let reversed = "https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW|https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+        let parsed = parse(&format!("{PAIR}\n{reversed}\n")).unwrap();
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.duplicate_count, 1);
+    }
+
+    #[test]
+    fn rejects_a_pair_whose_sides_name_the_same_service() {
+        assert!(normalize_line(&format!("{TRACK}|spotify:track:4aawyAB9vmqN3uQ7FjRGTy")).is_err());
+        assert!(normalize_line(&format!("{VIDEO}|https://youtu.be/dQw4w9WgXcQ")).is_err());
+    }
+
+    #[test]
+    fn rejects_a_non_track_spotify_side_written_first() {
+        assert!(
+            normalize_line(&format!(
+                "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy|{VIDEO}"
+            ))
+            .is_err()
+        );
+        assert!(normalize_line(&format!("https://spotify.link/AbCdEf|{VIDEO}")).is_err());
+        assert!(
+            normalize_line(&format!("{TRACK}|https://music.youtube.com/channel/UC123")).is_err()
+        );
     }
 
     #[test]

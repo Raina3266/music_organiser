@@ -50,9 +50,8 @@ EXAMPLES:
     " copyright \"/music\" --dry-run --csv changes.csv
 
 The download command reads one link per line and forces MP3 with synced
-lyrics. A line is a Spotify URL, a YouTube Music URL, or a
-YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL exact-source pair, and one file may mix
-all three. It then cleans and embeds the generated .lrc text and limits each
+lyrics. A line is a Spotify URL, a YouTube Music URL, or an exact-source pair of
+the two written in either order, and one file may mix all three. It then cleans and embeds the generated .lrc text and limits each
 ID3v2.3 tag to the 15 supported metadata types.
 
 Downloads are token-free by default. Supplying --auth-token, --token-file, or
