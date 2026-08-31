@@ -7,6 +7,7 @@ pub(crate) mod token;
 use self::cli::Config;
 use self::input::Entry;
 use self::spotdl::Classification;
+use crate::CopyrightLookup;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
 use crate::sources::{
@@ -67,7 +68,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     println!("Downloads will be stored in {}.", config.output.display());
 
     let interactive = !config.non_interactive && io::stdin().is_terminal();
-    let mut auth_token = startup_token(&mut config)?;
+    let mut auth_token = startup_token(&mut config, interactive)?;
 
     // Only a token-free run can be silently turned into an official one by
     // spotDL's own config, so this check waits until the mode is settled.
@@ -99,21 +100,24 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         println!("Copyright lookup: disabled with --no-copyright.");
         None
     } else {
-        println!("Copyright will be looked up per album through the iTunes Search API.");
+        println!(
+            "Copyright will be looked up through iTunes first, with MusicBrainz as a fallback."
+        );
         Some(ItunesClient::new(Limits::default())?)
     };
-    let mut musicbrainz = if config.no_language_lookup {
-        println!("Language: taken from the lyrics; the MusicBrainz lookup is disabled.");
-        None
+    let mut musicbrainz = Some(MusicBrainzClient::new(
+        env::var("MUSICBRAINZ_CONTACT").ok().as_deref(),
+        Limits::default(),
+    )?);
+    if config.no_language_lookup {
+        println!(
+            "MusicBrainz will look up missing ISRCs and copyright fallbacks; language will come from the lyrics."
+        );
     } else {
         println!(
-            "Language will be looked up per track on MusicBrainz, falling back to the lyrics."
+            "MusicBrainz will look up missing ISRCs and track languages; language falls back to the lyrics."
         );
-        Some(MusicBrainzClient::new(
-            env::var("MUSICBRAINZ_CONTACT").ok().as_deref(),
-            Limits::default(),
-        )?)
-    };
+    }
     let total = input.entries.len();
     let mut completed = 0usize;
     let mut failures = Vec::new();
@@ -174,16 +178,17 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); removed {} non-whitelisted frame(s); wrote {} copyright message(s); {} language(s) came from MusicBrainz and {} from the lyrics.",
+        "Metadata: updated {} file(s); removed {} non-whitelisted frame(s); wrote {} copyright message(s) and {} ISRC(s); {} language(s) came from MusicBrainz and {} from the lyrics.",
         metadata_totals.files_updated,
         metadata_totals.frames_stripped,
         metadata_totals.copyrights_written,
+        metadata_totals.isrcs_written,
         metadata_totals.languages_looked_up,
         metadata_totals.languages_detected
     );
     if metadata_totals.copyright_lookups_failed > 0 {
         println!(
-            "The iTunes copyright lookup failed for {} file(s); everything else in their tags was still written.",
+            "Copyright lookup failed on every available source for {} file(s); everything else in their tags was still written.",
             metadata_totals.copyright_lookups_failed
         );
     }
@@ -274,36 +279,77 @@ fn apply_metadata(
     let mut report = MetadataReport::default();
     let mut lookups_failed = 0;
     for file in &files {
-        // A failed lookup must not cost the rest of the tag work. iTunes needs
-        // no account and throttles freely, so a miss is left as a warning and
-        // the copyright frame is simply not touched.
-        let copyright = match itunes.as_deref_mut() {
-            Some(client) => match album_copyright(client, file) {
-                Ok(copyright) => copyright,
-                Err(error) => {
-                    eprintln!("Copyright: {error}");
-                    lookups_failed += 1;
-                    None
+        let mut evidence = metadata::evidence_of(file);
+
+        // One MusicBrainz recording lookup supplies both the ISRC that a
+        // token-free Spotify session lacks and the work language. Either can
+        // be absent without preventing the rest of the tag rewrite.
+        let track_metadata = match (musicbrainz.as_deref_mut(), evidence.as_ref()) {
+            (Some(client), Some(track)) => {
+                match client.track_metadata(track, !config.no_language_lookup) {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        eprintln!("MusicBrainz recording: {error}");
+                        Default::default()
+                    }
                 }
-            },
-            None => None,
+            }
+            _ => Default::default(),
         };
-        // MusicBrainz records the language on the work -- the song as
-        // written -- which is what TLAN is about. It is patchy, so a miss
-        // simply leaves the lyrics to be read for a guess as before.
-        let language = match musicbrainz.as_deref_mut() {
-            Some(client) => match track_language(client, file) {
-                Ok(language) => language,
+        let existing_isrc = evidence.as_ref().and_then(|track| track.isrc.clone());
+        let looked_up_isrc = existing_isrc
+            .is_none()
+            .then_some(track_metadata.isrc)
+            .flatten();
+        let isrc = existing_isrc.or_else(|| looked_up_isrc.clone());
+        if let Some(track) = evidence.as_mut()
+            && track.isrc.is_none()
+        {
+            track.isrc.clone_from(&isrc);
+        }
+
+        // iTunes generally has the catalogue's ready-made copyright line.
+        // A miss or failure falls through to MusicBrainz, which constructs the
+        // line from the release's copyright relationships.
+        let mut source_failed = false;
+        let mut copyright = if config.no_copyright {
+            None
+        } else {
+            match (itunes.as_deref_mut(), evidence.as_ref()) {
+                (Some(client), Some(track)) => match client.copyright(track) {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        eprintln!("Copyright (iTunes): {error}");
+                        source_failed = true;
+                        None
+                    }
+                },
+                _ => None,
+            }
+        };
+        if copyright.is_none()
+            && !config.no_copyright
+            && let (Some(client), Some(track)) = (musicbrainz.as_deref_mut(), evidence.as_ref())
+        {
+            match client.copyright(track) {
+                Ok(answer) => copyright = answer,
                 Err(error) => {
-                    eprintln!("Language: {error}");
-                    None
+                    eprintln!("Copyright (MusicBrainz): {error}");
+                    source_failed = true;
                 }
-            },
-            None => None,
-        };
-        report.absorb(metadata::finalize(
+            }
+        }
+        if copyright.is_none() && source_failed {
+            lookups_failed += 1;
+        }
+
+        let language = (!config.no_language_lookup)
+            .then_some(track_metadata.language)
+            .flatten();
+        report.absorb(metadata::finalize_with_isrc(
             file,
             copyright.as_deref(),
+            looked_up_isrc.as_deref(),
             language.as_ref(),
             &config.language,
         ));
@@ -355,8 +401,8 @@ fn apply_metadata(
             "taken from --language"
         };
         println!(
-            "Updated the tag: removed {} non-whitelisted frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
-            report.frames_stripped, report.copyrights_written
+            "Updated the tag: removed {} non-whitelisted frame(s), wrote {} copyright message(s) and {} ISRC(s), language {language}{lyrics}.",
+            report.frames_stripped, report.copyrights_written, report.isrcs_written
         );
     }
 
@@ -394,39 +440,18 @@ fn downloaded_files(
     }
 }
 
-/// Look up one file's language on MusicBrainz, using the tag spotDL wrote.
-fn track_language(
-    client: &mut MusicBrainzClient,
-    audio: &Path,
-) -> Result<Option<crate::Language>, String> {
-    let Some(track) = metadata::evidence_of(audio) else {
+/// Resolve an optional token. An interactive run with no explicit mode asks
+/// the user; scripts default to token-free unless a token or official mode was
+/// configured.
+fn startup_token(config: &mut Config, interactive: bool) -> Result<Option<String>, String> {
+    if config.token_free {
         return Ok(None);
-    };
-    client.language(&track).map_err(|error| error.to_string())
-}
-
-/// Look up one file's album on iTunes, using the tag spotDL wrote.
-fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<String>, String> {
-    let Some(wanted) = metadata::evidence_of(audio) else {
-        println!("The downloaded file has no album artist and album to search iTunes with.");
-        return Ok(None);
-    };
-    let copyright = client
-        .copyright(&wanted)
-        .map_err(|error| error.to_string())?;
-    if copyright.is_none() {
-        println!(
-            "iTunes has no matching album for \"{} - {}\".",
-            wanted.artist, wanted.album
-        );
     }
-    Ok(copyright)
-}
-
-/// Resolve an optional token. With no option, file, or environment value, the
-/// run stays token-free and starts without asking a question.
-fn startup_token(config: &mut Config) -> Result<Option<String>, String> {
     let token = initial_token(config)?;
+    if token.is_some() || config.official_api || !interactive {
+        return Ok(adopt_token(config, token));
+    }
+    let token = token::prompt_for_download_token()?;
     Ok(adopt_token(config, token))
 }
 
@@ -439,6 +464,9 @@ fn adopt_token(config: &mut Config, token: Option<String>) -> Option<String> {
 }
 
 fn initial_token(config: &Config) -> Result<Option<String>, String> {
+    if config.token_free {
+        return Ok(None);
+    }
     if let Some(raw_token) = &config.auth_token {
         return token::clean_token(raw_token).map(Some);
     }
@@ -752,6 +780,7 @@ mod tests {
             output: PathBuf::from("downloads"),
             spotdl: "spotdl".into(),
             official_api: false,
+            token_free: false,
             auth_token: None,
             token_file: None,
             non_interactive: false,
@@ -778,6 +807,15 @@ mod tests {
         let mut config = config();
         assert_eq!(adopt_token(&mut config, None), None);
         assert!(!config.official_api);
+    }
+
+    #[test]
+    fn explicit_token_free_mode_ignores_the_environment_path() {
+        let mut config = config();
+        config.token_free = true;
+        config.auth_token = Some("test-token-12345678901234567890".into());
+
+        assert_eq!(initial_token(&config).unwrap(), None);
     }
 
     #[test]

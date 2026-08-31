@@ -121,8 +121,9 @@ Every line is downloaded as MP3 with synchronised lyrics. Empty and
 timestamp-only lyric lines are removed before the `.lrc` text is embedded in
 `USLT`; each ID3v2.3 tag is then limited to the 15 supported metadata types.
 
-No credentials are needed for any of it. The copyright comes from the iTunes
-Search API, which is open to anyone.
+No credentials are needed for token-free downloads. Copyright comes from
+iTunes with a MusicBrainz fallback, and MusicBrainz also fills a missing ISRC;
+both catalogues are open without an account or API token.
 
 ## Global usage
 
@@ -214,12 +215,13 @@ stops before starting spotDL.
 |---|---|
 | `-o, --output <DIR>` | Download directory; default `~/Documents/Music` |
 | `--spotdl <PROGRAM>` | spotDL executable or path; default `spotdl` |
+| `--token-free` | Explicitly download without a Spotify token and skip the startup question |
 | `--official-api` | Explicitly use Spotify's official Web API |
 | `--auth-token <TOKEN>` | Use this short-lived token and automatically select official mode |
 | `--token-file <FILE>` | Read a token from a file and automatically select official mode |
-| `--non-interactive` | Never prompt for Deno or a replacement token |
+| `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-copyright` | Skip the iTunes copyright lookup |
+| `--no-copyright` | Skip both iTunes and MusicBrainz copyright lookups |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
@@ -315,16 +317,18 @@ extra metadata written by both spotDL and FFmpeg.
 | WWW Audio Source | `WOAS` |
 
 Other `APIC` picture types, such as back covers and artist images, are also
-deleted. A tag on this list is kept when the source provides it; token-free
-downloads can legitimately have no `TSRC`, because spotDL's token-free client
-does not return an ISRC. `TCOP` and `TLAN` are filled by this program, and the
-cleaned synced lyrics are written to `USLT`.
+deleted. A tag on this list is kept when the source provides it. When a
+token-free download has no `TSRC`, MusicBrainz is searched by recording title
+and artist and its ISRC is written when found. `TCOP` and `TLAN` are also
+filled by this program, and the cleaned synced lyrics are written to `USLT`.
 
 #### Copyright
 
-The copyright comes from the [iTunes Search
-API](https://performance-partners.apple.com/search-api), which needs no
-account, key, or token — nothing has to be registered or exported to use it.
+Copyright is requested from the [iTunes Search
+API](https://performance-partners.apple.com/search-api) first. When iTunes has
+no confident match or fails, MusicBrainz is tried next and constructs a line
+from the release's phonographic-copyright or copyright label relationship.
+Neither source needs an account, key, or token.
 
 Lookups are by album rather than by track, because the copyright belongs to the
 album and because the downloads are already grouped that way. The album artist
@@ -338,10 +342,10 @@ ignores case and punctuation and allows one name to extend the other, so
 (Deluxe Edition)`. Anything less similar is treated as a different release and
 the frame is left alone.
 
-If the lookup fails outright — the API throttling, or no network — that is
-reported as a warning and **the rest of the tag is still written**. The rating
-still goes, the lyrics are still embedded, and only `TCOP` is left untouched.
-`--no-copyright` skips the lookup altogether.
+If both lookups fail outright — API throttling or no network — that is reported
+as a warning and **the rest of the tag is still written**. The rating still
+goes, the lyrics are still embedded, and only `TCOP` is left untouched.
+`--no-copyright` skips both sources altogether.
 
 Two things to know about the API: it is throttled per IP, so requests are
 spaced out and a throttled response is retried a few times before giving up;
@@ -372,9 +376,11 @@ describes the song rather than guessing at whatever text the `.lrc` happens to
 hold.
 
 This costs two MusicBrainz requests per track, spaced at the published one per
-second. Against the time spent fetching and transcoding the audio that is not
-the bottleneck, but `--no-language-lookup` turns it off and returns to reading
-the lyrics alone. Set `MUSICBRAINZ_CONTACT` so MusicBrainz can reach you.
+second, and returns the recording's ISRC in the same lookup. Against the time
+spent fetching and transcoding the audio that is not the bottleneck.
+`--no-language-lookup` skips the work-language part but still looks up a
+missing ISRC and any copyright fallback. Set `MUSICBRAINZ_CONTACT` so
+MusicBrainz can reach you.
 
 `TLAN` is written as a readable **name** — `English`, `Chinese`, `Korean`,
 `Spanish` — because that is what a tagger displays. ID3v2.3 specifies an
@@ -500,9 +506,18 @@ If spotDL reports that Deno is required:
 
 ### Optional Spotify token
 
-The command no longer asks for a token before downloading. With no token
-option or environment variable, it immediately uses spotDL's token-free
-client. To use a token, supply exactly one of these:
+An interactive run now makes the choice explicit:
+
+```text
+Choose how this download should access Spotify metadata:
+  1) Without a Spotify token (token-free)
+  2) With a Spotify token (official Web API)
+Select 1 or 2 [1]:
+```
+
+Press Enter or choose `1` for token-free mode. Choose `2` to paste a token.
+For a script, use `--token-free` to select the first mode without a prompt, or
+provide exactly one of these to select official mode:
 
 ```bash
 music-tag-transfer download links.txt --auth-token 'short-lived-access-token'
@@ -525,7 +540,8 @@ replacement.
 
 ### Token-free and official API modes
 
-The default mode is token-free. It deliberately does not pass
+The interactive default and non-interactive fallback are token-free. It
+deliberately does not pass
 `--use-official-api`, `--auth-token`, or `--use-cache-file` to spotDL.
 Before downloading, it checks spotDL's active `config.json` and stops if
 `use_official_api`, `use_cache_file`, `user_auth`, or a saved

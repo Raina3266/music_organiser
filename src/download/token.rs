@@ -75,6 +75,51 @@ pub(super) fn prompt_for_token(reason: &str) -> Result<Option<String>, String> {
     read_token("Paste the token, or press Enter to cancel: ")
 }
 
+/// Let an interactive download choose its Spotify metadata mode.
+///
+/// Returning `None` means token-free mode. A blank answer deliberately chooses
+/// that default, so simply pressing Enter never exposes a token or opts into
+/// Spotify's official API quotas.
+pub(super) fn prompt_for_download_token() -> Result<Option<String>, String> {
+    eprintln!();
+    eprintln!("Choose how this download should access Spotify metadata:");
+    eprintln!("  1) Without a Spotify token (token-free)");
+    eprintln!("  2) With a Spotify token (official Web API)");
+
+    for _ in 0..3 {
+        eprint!("Select 1 or 2 [1]: ");
+        io::stderr()
+            .flush()
+            .map_err(|error| format!("cannot flush the Spotify mode prompt: {error}"))?;
+
+        let mut response = String::new();
+        io::stdin()
+            .read_line(&mut response)
+            .map_err(|error| format!("cannot read the Spotify mode: {error}"))?;
+        match parse_download_mode(&response) {
+            Some(false) => return Ok(None),
+            Some(true) => {
+                eprintln!(
+                    "Paste a short-lived Spotify access token. Do not enter your password or Client Secret."
+                );
+                return read_token("Paste the token, or press Enter to continue without a token: ");
+            }
+            None => eprintln!("Please enter 1 for token-free mode or 2 for token mode."),
+        }
+    }
+    Err("no valid Spotify mode was selected after 3 attempts".into())
+}
+
+/// `Some(false)` is token-free, `Some(true)` uses a token, and `None` is an
+/// invalid choice. Kept separate so the interactive contract is unit tested.
+fn parse_download_mode(answer: &str) -> Option<bool> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "1" | "without" | "without token" | "token-free" | "token free" => Some(false),
+        "2" | "with" | "with token" | "token" => Some(true),
+        _ => None,
+    }
+}
+
 /// Ask one question and clean whatever was typed.
 ///
 /// End of input counts as an empty answer, so a closed stdin declines rather
@@ -97,7 +142,7 @@ fn read_token(question: &str) -> Result<Option<String>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::clean_token;
+    use super::{clean_token, parse_download_mode};
 
     const TOKEN: &str = "test-token-12345678901234567890";
 
@@ -116,5 +161,15 @@ mod tests {
     fn rejects_short_or_multiword_values() {
         assert!(clean_token("short").is_err());
         assert!(clean_token(&format!("{TOKEN} extra")).is_err());
+    }
+
+    #[test]
+    fn download_mode_defaults_to_token_free_and_accepts_both_choices() {
+        assert_eq!(parse_download_mode(""), Some(false));
+        assert_eq!(parse_download_mode("1"), Some(false));
+        assert_eq!(parse_download_mode("token-free"), Some(false));
+        assert_eq!(parse_download_mode("2"), Some(true));
+        assert_eq!(parse_download_mode("with token"), Some(true));
+        assert_eq!(parse_download_mode("maybe"), None);
     }
 }

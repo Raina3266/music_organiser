@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::metadata::normalize_isrc;
 use crate::sources::{
     Limits,
     http::Http,
@@ -102,7 +103,16 @@ struct RecordingStub {
 #[derive(Debug, Deserialize)]
 struct Recording {
     #[serde(default)]
+    isrcs: Vec<String>,
+    #[serde(default)]
     relations: Vec<WorkRelation>,
+}
+
+/// Recording-level metadata that MusicBrainz can add without a Spotify token.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct TrackMetadata {
+    pub isrc: Option<String>,
+    pub language: Option<Language>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,9 +142,9 @@ pub struct Client {
     /// language.
     recordings: String,
     albums: HashMap<(String, String), Option<String>>,
-    /// One answer per track, since language is a property of the song rather
-    /// than of the release it sits on.
-    languages: HashMap<String, Option<Language>>,
+    /// One answer per track. The language flag is part of the key so a lookup
+    /// that intentionally skipped work relationships cannot hide them later.
+    tracks: HashMap<(String, bool), TrackMetadata>,
 }
 
 impl Client {
@@ -157,7 +167,7 @@ impl Client {
             releases: SEARCH_URL.to_owned(),
             recordings: RECORDING_URL.to_owned(),
             albums: HashMap::new(),
-            languages: HashMap::new(),
+            tracks: HashMap::new(),
         })
     }
 
@@ -168,7 +178,7 @@ impl Client {
             releases: releases.to_owned(),
             recordings: releases.to_owned(),
             albums: HashMap::new(),
-            languages: HashMap::new(),
+            tracks: HashMap::new(),
         }
     }
 
@@ -183,27 +193,40 @@ impl Client {
     /// it, no language recorded on the work. Work data is patchy, so a caller
     /// should have something else to fall back on.
     pub fn language(&mut self, track: &AlbumEvidence) -> Result<Option<Language>, LookupError> {
+        Ok(self.track_metadata(track, true)?.language)
+    }
+
+    /// Look up the ISRC and, when requested, the work language in one pair of
+    /// MusicBrainz requests. This is used after token-free downloads, where
+    /// spotDL ordinarily has no ISRC to put in `TSRC`.
+    pub fn track_metadata(
+        &mut self,
+        track: &AlbumEvidence,
+        include_language: bool,
+    ) -> Result<TrackMetadata, LookupError> {
         let Some(title) = track.track_title.as_deref() else {
-            return Ok(None);
+            return Ok(TrackMetadata::default());
         };
         let key = match &track.isrc {
             Some(isrc) => format!("isrc:{isrc}"),
             None => format!("{} - {title}", track.artist),
         };
-        if let Some(cached) = self.languages.get(&key) {
+        let cache_key = (key, include_language);
+        if let Some(cached) = self.tracks.get(&cache_key) {
             return Ok(cached.clone());
         }
 
-        let language = self.look_the_work_up(track, title)?;
-        self.languages.insert(key, language.clone());
-        Ok(language)
+        let metadata = self.look_the_recording_up(track, title, include_language)?;
+        self.tracks.insert(cache_key, metadata.clone());
+        Ok(metadata)
     }
 
-    fn look_the_work_up(
+    fn look_the_recording_up(
         &mut self,
         track: &AlbumEvidence,
         title: &str,
-    ) -> Result<Option<Language>, LookupError> {
+        include_language: bool,
+    ) -> Result<TrackMetadata, LookupError> {
         // An ISRC names the recording outright; without one the artist and
         // title have to do, ranked the same way releases are.
         let query = match &track.isrc {
@@ -226,20 +249,30 @@ impl Client {
             &[],
         )?
         else {
-            return Ok(None);
+            return Ok(TrackMetadata::default());
         };
 
         let Some(id) = best_recording(&found.recordings, track, title) else {
-            return Ok(None);
+            return Ok(TrackMetadata::default());
         };
         let url = format!("{recordings}/{id}");
+        let includes = if include_language {
+            "isrcs+work-rels"
+        } else {
+            "isrcs"
+        };
         let Some(recording): Option<Recording> =
             self.http
-                .get_json(&url, &[("inc", "work-rels"), ("fmt", "json")], &[])?
+                .get_json(&url, &[("inc", includes), ("fmt", "json")], &[])?
         else {
-            return Ok(None);
+            return Ok(TrackMetadata::default());
         };
-        Ok(language_of_works(&recording))
+        Ok(TrackMetadata {
+            isrc: track.isrc.clone().or_else(|| isrc_of_recording(&recording)),
+            language: include_language
+                .then(|| language_of_works(&recording))
+                .flatten(),
+        })
     }
 
     fn lookup(&mut self, wanted: &AlbumEvidence) -> Result<Option<String>, LookupError> {
@@ -409,6 +442,15 @@ fn language_of_works(recording: &Recording) -> Option<Language> {
         .filter_map(|relation| relation.work.as_ref())
         .flat_map(|work| work.languages.iter().chain(work.language.iter()))
         .find_map(|code| parse_language(code))
+}
+
+/// Pick the first valid recording identifier MusicBrainz returns.
+///
+/// A recording can legitimately carry more than one ISRC (for example, codes
+/// assigned in different territories). `TSRC` holds one value, and each code
+/// identifies the same recording, so the API's first valid value is suitable.
+fn isrc_of_recording(recording: &Recording) -> Option<String> {
+    recording.isrcs.iter().find_map(|isrc| normalize_isrc(isrc))
 }
 
 /// Wrap a value as a Lucene phrase, dropping what would break the query.
@@ -682,7 +724,7 @@ mod tests {
             r#"{"recordings":[
                 {"id":"right","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
             ]}"#,
-            r#"{"relations":[
+            r#"{"isrcs":["GBUM71029604"],"relations":[
                 {"work":{"languages":["kor"],"language":"kor"}}
             ]}"#,
         ]);
@@ -704,8 +746,16 @@ mod tests {
             asked,
             [
                 "/?query=artist%3A%22Daft+Punk%22+AND+recording%3A%22One+More+Time%22&limit=10&fmt=json",
-                "/right?inc=work-rels&fmt=json",
+                "/right?inc=isrcs%2Bwork-rels&fmt=json",
             ]
+        );
+        assert_eq!(
+            client
+                .track_metadata(&track("Daft Punk", "Discovery", "One More Time"), true)
+                .unwrap()
+                .isrc
+                .as_deref(),
+            Some("GBUM71029604")
         );
     }
 
@@ -717,7 +767,7 @@ mod tests {
             r#"{"recordings":[
                 {"id":"exact","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
             ]}"#,
-            r#"{"relations":[{"work":{"languages":["eng"]}}]}"#,
+            r#"{"isrcs":["GBUM71029604"],"relations":[{"work":{"languages":["eng"]}}]}"#,
         ]);
         let mut client = Client::pointing_at(&server.address);
         let mut wanted = track("Daft Punk", "Discovery", "One More Time");
@@ -749,7 +799,7 @@ mod tests {
         // A recording with no work linked to it, which is the common case.
         let server = Server::answering(&[
             r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
-            r#"{"relations":[]}"#,
+            r#"{"isrcs":[],"relations":[]}"#,
         ]);
         let mut client = Client::pointing_at(&server.address);
         assert_eq!(
@@ -763,7 +813,7 @@ mod tests {
         // A work with no language recorded on it.
         let server = Server::answering(&[
             r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
-            r#"{"relations":[{"work":{}}]}"#,
+            r#"{"isrcs":[],"relations":[{"work":{}}]}"#,
         ]);
         let mut client = Client::pointing_at(&server.address);
         assert_eq!(
@@ -796,7 +846,7 @@ mod tests {
     fn a_track_is_only_looked_up_once() {
         let server = Server::answering(&[
             r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
-            r#"{"relations":[{"work":{"languages":["fra"]}}]}"#,
+            r#"{"isrcs":[],"relations":[{"work":{"languages":["fra"]}}]}"#,
         ]);
         let mut client = Client::pointing_at(&server.address);
         let wanted = track("Daft Punk", "Discovery", "One More Time");
@@ -823,5 +873,24 @@ mod tests {
             None
         );
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn token_free_lookup_returns_a_normalized_isrc_without_work_data() {
+        let server = Server::answering(&[
+            r#"{"recordings":[
+                {"id":"right","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"isrcs":["gb-um7-10-29604"]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+
+        let metadata = client
+            .track_metadata(&track("Daft Punk", "Discovery", "One More Time"), false)
+            .unwrap();
+
+        assert_eq!(metadata.isrc.as_deref(), Some("GBUM71029604"));
+        assert_eq!(metadata.language, None);
+        assert_eq!(server.requests()[1].target, "/right?inc=isrcs&fmt=json");
     }
 }

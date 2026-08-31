@@ -10,8 +10,8 @@
 //! actually read, and the ones that understand timed lyrics parse them out of
 //! its text.
 //!
-//! The `TSRC` ISRC frame is deliberately left as spotDL wrote it: iTunes does
-//! not publish ISRCs, and spotDL already fills the frame from its own metadata.
+//! The `TSRC` ISRC frame keeps spotDL's value when present and is filled from
+//! MusicBrainz when a token-free download left it empty.
 
 use std::{
     fs,
@@ -66,6 +66,8 @@ pub struct MetadataReport {
     pub frames_stripped: usize,
     /// Files that received a `TCOP` copyright message.
     pub copyrights_written: usize,
+    /// Files that received a MusicBrainz `TSRC` value.
+    pub isrcs_written: usize,
     /// Files whose copyright lookup failed outright. The rest of the tag is
     /// still rewritten, so this is a warning rather than a failure.
     pub copyright_lookups_failed: usize,
@@ -95,6 +97,7 @@ impl MetadataReport {
         self.files_updated += other.files_updated;
         self.frames_stripped += other.frames_stripped;
         self.copyrights_written += other.copyrights_written;
+        self.isrcs_written += other.isrcs_written;
         self.copyright_lookups_failed += other.copyright_lookups_failed;
         self.languages_detected += other.languages_detected;
         self.languages_looked_up += other.languages_looked_up;
@@ -119,6 +122,9 @@ impl MetadataReport {
 /// `copyright` is the message to store, or `None` when no album matched, in
 /// which case the frame is left alone.
 ///
+/// `isrc` is a validated recording identifier from the existing tag or from
+/// MusicBrainz. `None` leaves the frame alone.
+///
 /// `known_language` is a language a catalogue has already settled, which is
 /// taken as authoritative: it describes the song rather than guessing at its
 /// text. `None` means nobody knew, and the lyrics are read for a guess;
@@ -127,9 +133,10 @@ impl MetadataReport {
 /// Any `.lrc` file sitting next to `audio` is pasted into the `USLT` lyrics
 /// frame and then deleted, but only after the whole tag has been read back and
 /// checked.
-pub fn finalize(
+pub fn finalize_with_isrc(
     audio: &Path,
     copyright: Option<&str>,
+    isrc: Option<&str>,
     known_language: Option<&Language>,
     default_language: &Language,
 ) -> MetadataReport {
@@ -189,6 +196,7 @@ pub fn finalize(
     // format, so this removal is not only about undoing earlier runs.
     let sylt_removed = tag.synchronised_lyrics().count();
     set_text(&mut tag, COPYRIGHT_FRAME, copyright);
+    set_text(&mut tag, ISRC_FRAME, isrc);
     set_text(&mut tag, LANGUAGE_FRAME, Some(language.name.as_str()));
     if let Some(lyrics) = &lyrics {
         tag.remove_all_lyrics();
@@ -208,7 +216,7 @@ pub fn finalize(
         return report;
     }
 
-    if let Err(reason) = verify(audio, copyright, &language.name, lyrics.as_deref()) {
+    if let Err(reason) = verify(audio, copyright, isrc, &language.name, lyrics.as_deref()) {
         report.fail(audio.to_path_buf(), reason);
         return report;
     }
@@ -231,9 +239,23 @@ pub fn finalize(
     report.files_updated = 1;
     report.frames_stripped = frames_stripped;
     report.copyrights_written = usize::from(copyright.is_some());
+    report.isrcs_written = usize::from(isrc.is_some());
     report.languages_detected = usize::from(detected);
     report.languages_looked_up = usize::from(known_language.is_some());
     report
+}
+
+/// Apply the download-time metadata rules while leaving `TSRC` untouched.
+///
+/// Kept as the original public API for callers that do not perform a separate
+/// MusicBrainz ISRC lookup. The download command uses [`finalize_with_isrc`].
+pub fn finalize(
+    audio: &Path,
+    copyright: Option<&str>,
+    known_language: Option<&Language>,
+    default_language: &Language,
+) -> MetadataReport {
+    finalize_with_isrc(audio, copyright, None, known_language, default_language)
 }
 
 /// The album artist and album name recorded in a file's tag.
@@ -271,7 +293,7 @@ pub(crate) fn album_evidence(tag: &Tag) -> Option<AlbumEvidence> {
     Some(AlbumEvidence {
         artist,
         album,
-        isrc: text(tag, ISRC_FRAME).filter(|isrc| is_an_isrc(isrc)),
+        isrc: text(tag, ISRC_FRAME).and_then(|isrc| normalize_isrc(&isrc)),
         year: recorded_year(tag),
         // The total in "5/12", not the track's own number.
         total_tracks: tag.total_tracks(),
@@ -303,15 +325,16 @@ fn recorded_year(tag: &Tag) -> Option<String> {
 /// Checked because a wrong ISRC is worse than none — it would search
 /// confidently for the wrong recording — and because taggers do leave
 /// placeholder text in the frame.
-fn is_an_isrc(value: &str) -> bool {
+pub(crate) fn normalize_isrc(value: &str) -> Option<String> {
     let compact: String = value
         .chars()
         .filter(|character| character.is_alphanumeric())
         .collect();
-    compact.len() == 12
+    (compact.len() == 12
         && compact[..2].chars().all(|c| c.is_ascii_alphabetic())
         && compact[2..5].chars().all(|c| c.is_ascii_alphanumeric())
-        && compact[5..].chars().all(|c| c.is_ascii_digit())
+        && compact[5..].chars().all(|c| c.is_ascii_digit()))
+    .then(|| compact.to_ascii_uppercase())
 }
 
 /// Replace a text frame, leaving it untouched when there is no value to store.
@@ -356,6 +379,7 @@ fn is_allowed_frame(frame: &Frame) -> bool {
 fn verify(
     audio: &Path,
     copyright: Option<&str>,
+    isrc: Option<&str>,
     language: &str,
     lyrics: Option<&str>,
 ) -> Result<(), String> {
@@ -371,6 +395,7 @@ fn verify(
 
     for (frame_id, expected, label) in [
         (COPYRIGHT_FRAME, copyright, "copyright message"),
+        (ISRC_FRAME, isrc, "ISRC"),
         (LANGUAGE_FRAME, Some(language), "language"),
     ] {
         let Some(expected) = expected else {
@@ -533,9 +558,10 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(
+        let report = finalize_with_isrc(
             &audio,
             Some("\u{2117} 2001 Daft Life Limited"),
+            None,
             None,
             &english(),
         );
@@ -607,7 +633,7 @@ mod tests {
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize(&audio, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.frames_stripped, 4);
         assert_eq!(report.lyrics_embedded, 0);
@@ -637,9 +663,10 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "[ar: Artist]\njust prose\n").unwrap();
 
-        let report = finalize(
+        let report = finalize_with_isrc(
             &audio,
             Some("\u{2117} 2001 Daft Life Limited"),
+            None,
             None,
             &english(),
         );
@@ -662,7 +689,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "  \n\n").unwrap();
 
-        let report = finalize(&audio, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, &english());
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -684,7 +711,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.languages_detected, 1);
 
@@ -708,7 +735,13 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, None, &parse_language("Japanese").unwrap());
+        let report = finalize_with_isrc(
+            &audio,
+            None,
+            None,
+            None,
+            &parse_language("Japanese").unwrap(),
+        );
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.lyrics_embedded, 1);
 
@@ -730,16 +763,48 @@ mod tests {
     #[test]
     fn accepts_only_something_shaped_like_an_isrc() {
         // Two letters, three alphanumerics, seven digits.
-        assert!(is_an_isrc("GBUM71029604"));
-        assert!(is_an_isrc("US-RC1-72-00023"), "separators are conventional");
-        assert!(!is_an_isrc(""));
-        assert!(!is_an_isrc("unknown"));
+        assert_eq!(
+            normalize_isrc("GBUM71029604").as_deref(),
+            Some("GBUM71029604")
+        );
+        assert_eq!(
+            normalize_isrc("us-rc1-72-00023").as_deref(),
+            Some("USRC17200023"),
+            "separators are conventional"
+        );
+        assert_eq!(normalize_isrc(""), None);
+        assert_eq!(normalize_isrc("unknown"), None);
         // A wrong ISRC is worse than none: it searches confidently for the
         // wrong recording, so anything malformed is refused.
-        assert!(!is_an_isrc("GBUM7102960"), "too short");
-        assert!(!is_an_isrc("GBUM710296045"), "too long");
-        assert!(!is_an_isrc("1BUM71029604"), "country must be letters");
-        assert!(!is_an_isrc("GBUM7102960X"), "the tail must be digits");
+        assert_eq!(normalize_isrc("GBUM7102960"), None, "too short");
+        assert_eq!(normalize_isrc("GBUM710296045"), None, "too long");
+        assert_eq!(
+            normalize_isrc("1BUM71029604"),
+            None,
+            "country must be letters"
+        );
+        assert_eq!(
+            normalize_isrc("GBUM7102960X"),
+            None,
+            "the tail must be digits"
+        );
+    }
+
+    #[test]
+    fn writes_and_verifies_a_looked_up_isrc() {
+        let directory = TempDir::new("looked-up-isrc");
+        let audio = directory.0.join("Track.mp3");
+        fs::write(&audio, b"").unwrap();
+
+        let report = finalize_with_isrc(&audio, None, Some("GBUM71029604"), None, &english());
+
+        assert_eq!(report.failures, Vec::new());
+        assert_eq!(report.isrcs_written, 1);
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.get(ISRC_FRAME).and_then(|frame| frame.content().text()),
+            Some("GBUM71029604")
+        );
     }
 
     #[test]
@@ -811,7 +876,7 @@ mod tests {
         .unwrap();
 
         let korean = parse_language("Korean").unwrap();
-        let report = finalize(&audio, None, Some(&korean), &english());
+        let report = finalize_with_isrc(&audio, None, None, Some(&korean), &english());
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(
@@ -838,7 +903,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize(&audio, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, &english());
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(
@@ -856,7 +921,13 @@ mod tests {
         let audio = directory.0.join("song.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize(&audio, None, None, &parse_language("Japanese").unwrap());
+        let report = finalize_with_isrc(
+            &audio,
+            None,
+            None,
+            None,
+            &parse_language("Japanese").unwrap(),
+        );
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(

@@ -12,6 +12,8 @@ pub struct Config {
     pub output: PathBuf,
     pub spotdl: String,
     pub official_api: bool,
+    /// Explicitly skip Spotify's official API and any configured token.
+    pub token_free: bool,
     pub auth_token: Option<String>,
     pub token_file: Option<PathBuf>,
     pub non_interactive: bool,
@@ -42,6 +44,7 @@ where
     let mut output: Option<PathBuf> = None;
     let mut spotdl = env::var("SPOTDL_PROGRAM").unwrap_or_else(|_| "spotdl".into());
     let mut official_api = false;
+    let mut token_free = false;
     let mut auth_token = None;
     let mut token_file = None;
     let mut non_interactive = false;
@@ -59,6 +62,7 @@ where
             "-h" | "--help" => return Ok(ParsedCommand::Help),
             "-V" | "--version" => return Ok(ParsedCommand::Version),
             "--official-api" => official_api = true,
+            "--token-free" => token_free = true,
             "--non-interactive" => non_interactive = true,
             "--auto-download-deno" => auto_download_deno = true,
             "--no-copyright" => no_copyright = true,
@@ -129,7 +133,12 @@ where
     if spotdl.trim().is_empty() {
         return Err("--spotdl cannot be empty".into());
     }
-    validate_token_options(auth_token.as_deref(), token_file.as_deref())?;
+    validate_token_options(
+        official_api,
+        token_free,
+        auth_token.as_deref(),
+        token_file.as_deref(),
+    )?;
     // Supplying a token is itself an explicit request for Spotify's official
     // API. Requiring --official-api as well made the optional-token path
     // needlessly easy to get wrong.
@@ -141,6 +150,7 @@ where
         output,
         spotdl,
         official_api,
+        token_free,
         auth_token,
         token_file,
         non_interactive,
@@ -166,11 +176,19 @@ fn validate_language(value: &str) -> Result<Language, String> {
 }
 
 fn validate_token_options(
+    official_api: bool,
+    token_free: bool,
     auth_token: Option<&str>,
     token_file: Option<&Path>,
 ) -> Result<(), String> {
     if auth_token.is_some() && token_file.is_some() {
         return Err("use either --auth-token or --token-file, not both".into());
+    }
+    if token_free && (official_api || auth_token.is_some() || token_file.is_some()) {
+        return Err(
+            "--token-free cannot be combined with --official-api, --auth-token, or --token-file"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -228,12 +246,13 @@ USAGE:
 OPTIONS:
     -o, --output <DIR>                Output directory [default: ~/Documents/Music]
         --spotdl <PROGRAM>            spotDL executable [default: spotdl]
+        --token-free                  Download without a Spotify access token
         --official-api                Opt in to Spotify's official Web API and its quotas
         --auth-token <TOKEN>          Use this short-lived Spotify access token
         --token-file <FILE>           Read a Spotify access token from a file
-        --non-interactive             Never prompt for Deno or a replacement token
+        --non-interactive             Never prompt for Spotify mode, Deno, or a token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
-        --no-copyright                Skip the iTunes copyright lookup entirely
+        --no-copyright                Skip iTunes and MusicBrainz copyright lookups
         --no-language-lookup          Skip the MusicBrainz language lookup and read the
                                       lyrics instead
         --language <LANGUAGE>         Fallback language, by name or code [default: English]
@@ -293,19 +312,18 @@ METADATA:
     Every other frame is removed, and APIC pictures other than Cover (front)
     are removed too.
 
-        TCOP   the copyright message, looked up per album on the iTunes
-               Search API, which needs no account, key, or token
+        TCOP   the copyright message, looked up on iTunes first and then
+               MusicBrainz; neither needs an account, key, or token
         TLAN   the language as a readable name - English, Chinese,
                Korean - detected from the lyric text with its timestamps
                stripped, falling back to --language when the lyrics do not
                settle it. ID3v2.3 specifies an ISO-639-2 code here, but the
                name is what a tagger shows; the three-byte language field
                inside the USLT frame keeps the code.
-        TSRC   is left exactly as spotDL wrote it; iTunes publishes no ISRCs
+        TSRC   spotDL's value, or a MusicBrainz recording lookup when missing
 
-    A copyright is stored only when an iTunes album matches both the album
-    artist and the album name in the tag, so a wrong one is never written.
-    Use --no-copyright to skip the lookup.
+    A copyright is stored only when a catalogue album matches the evidence in
+    the tag. Use --no-copyright to skip both copyright sources.
 
 SYNCED LYRICS:
     Every download asks spotDL for time-synced lyrics and for the .lrc file
@@ -320,11 +338,13 @@ SYNCED LYRICS:
     line is added to the retry list.
 
 SPOTIFY MODE:
-    Downloads are token-free by default. Supplying --auth-token,
-    --token-file, or SPOTIFY_AUTH_TOKEN automatically switches the run to
-    Spotify's official Web API, the only source for the ISRC (TSRC) frame.
-    --official-api can still request official mode without a supplied token.
-    If an official token expires, an interactive run can ask for a replacement.
+    An interactive run asks whether to download with or without a Spotify
+    token. Press Enter (or choose 1) for token-free mode; choose 2 to paste a
+    token and use the official Web API. For scripts, --token-free makes the
+    first choice explicit, while --auth-token, --token-file, or
+    SPOTIFY_AUTH_TOKEN select official mode. --official-api can still request
+    official mode without a supplied token. If a token expires, an interactive
+    run can ask for a replacement.
 
 ENVIRONMENT:
     SPOTDL_PROGRAM                    Alternative spotDL executable or path
@@ -337,7 +357,10 @@ Blank lines and lines beginning with # are ignored.",
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_positive_u32, set_input, validate_language, validate_token_options};
+    use super::{
+        ParsedCommand, parse_args, parse_positive_u32, set_input, validate_language,
+        validate_token_options,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -366,9 +389,26 @@ mod tests {
 
     #[test]
     fn token_options_are_optional_but_mutually_exclusive() {
-        assert!(validate_token_options(Some("token"), None).is_ok());
-        assert!(validate_token_options(None, Some(Path::new("token.txt"))).is_ok());
-        assert!(validate_token_options(None, None).is_ok());
-        assert!(validate_token_options(Some("token"), Some(Path::new("token.txt"))).is_err());
+        assert!(validate_token_options(false, false, Some("token"), None).is_ok());
+        assert!(validate_token_options(false, false, None, Some(Path::new("token.txt"))).is_ok());
+        assert!(validate_token_options(false, false, None, None).is_ok());
+        assert!(
+            validate_token_options(false, false, Some("token"), Some(Path::new("token.txt")))
+                .is_err()
+        );
+        assert!(validate_token_options(false, true, Some("token"), None).is_err());
+        assert!(validate_token_options(true, true, None, None).is_err());
+    }
+
+    #[test]
+    fn token_free_flag_selects_the_mode_without_enabling_official_api() {
+        let ParsedCommand::Run(config) =
+            parse_args(["--token-free".to_owned(), "links.txt".to_owned()]).unwrap()
+        else {
+            panic!("expected the download configuration");
+        };
+
+        assert!(config.token_free);
+        assert!(!config.official_api);
     }
 }
