@@ -52,13 +52,12 @@ EXAMPLES:
 The download command reads one link per line and forces MP3 with synced
 lyrics. A line is a Spotify URL, a YouTube Music URL, or a
 YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL exact-source pair, and one file may mix
-all three. It then rewrites each file's ID3v2.3 tag: the POPM rating frame is
-removed, the TCOP copyright message is looked up on iTunes, and the generated
-.lrc file is pasted into the ordinary USLT lyrics frame.
+all three. It then cleans and embeds the generated .lrc text and limits each
+ID3v2.3 tag to the 15 supported metadata types.
 
-Before the first download, an interactive run asks for a Spotify access token.
-Pasting one uses Spotify's official Web API, the only source for the ISRC
-frame; pressing Enter downloads token-free.
+Downloads are token-free by default. Supplying --auth-token, --token-file, or
+SPOTIFY_AUTH_TOKEN automatically enables Spotify's official API; no separate
+--official-api flag is required.
 
 Tag names are case-sensitive. The delete command searches recursively, skips
 files that do not contain a requested tag, and writes changed tags as ID3v2.3.

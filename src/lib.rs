@@ -1,6 +1,5 @@
-//! spotDL downloads of Spotify and YouTube Music links, ID3 metadata
-//! rewriting, recursive ID3v2.3 tag deletion, recursive ID3 frame export, and
-//! copyright refreshes for music already on disk.
+//! Download Spotify and YouTube Music links through spotDL, clean and embed
+//! synced lyrics, standardise ID3 metadata, and maintain tags recursively.
 
 pub mod cli;
 mod copyright;

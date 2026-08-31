@@ -1,7 +1,8 @@
 # music-organiser
 
-`music-organiser` is a Rust command-line project for preparing and maintaining
-a local music library. One executable provides four related workflows:
+`music-organiser` is a Rust CLI that downloads Spotify and YouTube Music links
+through spotDL, cleans and embeds synced lyrics, standardises ID3 tags, and
+provides recursive tag maintenance and CSV export tools.
 
 | Command | Purpose |
 |---|---|
@@ -116,10 +117,9 @@ the same file.
    music-tag-transfer download links.txt --output ./music
    ```
 
-Every line is downloaded as MP3 with synchronised lyrics. Each file's ID3v2.3
-tag is then rewritten: the `POPM` rating and `TSSE` encoder-settings frames are
-removed, `TCOP` and `TLAN` are filled in, and the generated `.lrc` file is
-pasted into the ordinary `USLT` lyrics frame and deleted.
+Every line is downloaded as MP3 with synchronised lyrics. Empty and
+timestamp-only lyric lines are removed before the `.lrc` text is embedded in
+`USLT`; each ID3v2.3 tag is then limited to the 15 supported metadata types.
 
 No credentials are needed for any of it. The copyright comes from the iTunes
 Search API, which is open to anyone.
@@ -215,9 +215,9 @@ stops before starting spotDL.
 | `-o, --output <DIR>` | Download directory; default `~/Documents/Music` |
 | `--spotdl <PROGRAM>` | spotDL executable or path; default `spotdl` |
 | `--official-api` | Explicitly use Spotify's official Web API |
-| `--auth-token <TOKEN>` | Official mode: use this short-lived access token |
-| `--token-file <FILE>` | Official mode: read the access token from a file |
-| `--non-interactive` | Never prompt for a token, Deno, or a replacement token |
+| `--auth-token <TOKEN>` | Use this short-lived token and automatically select official mode |
+| `--token-file <FILE>` | Read a token from a file and automatically select official mode |
+| `--non-interactive` | Never prompt for Deno or a replacement token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
 | `--no-copyright` | Skip the iTunes copyright lookup |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
@@ -291,49 +291,34 @@ Two caveats:
 - Existing downloads are not moved. Rerunning the same input file re-downloads
   them into the new layout, because `--overwrite force` is used.
 
-### Rating, encoder, date, copyright, and language frames
+### The 15-frame metadata whitelist
 
-A freshly downloaded file carries two frames that describe the download rather
-than the music: `POPM`, the popularimeter spotDL fills from Spotify's
-popularity score — the frame most taggers display as a rating — and `TSSE`, the
-encoder-settings string FFmpeg leaves behind (something like `Lavf58.76.100`).
-spotDL also leaves `TCOP` empty, because a single-track fetch does not carry
-the album's copyright.
+After each download, every frame outside this list is deleted. This catches
+extra metadata written by both spotDL and FFmpeg.
 
-spotDL writes the release date **twice**: the whole date in `TDRC`
-(`2020-05-20`) and the year again in `TYER` (`2020`). `TDRC` is ID3v2.4's
-single timestamp frame; `TYER` is the ID3v2.3 frame it replaced, and spotDL
-writes both so that readers of either version find a date. Taggers show the
-pair as two competing date fields.
-
-After each download this program rewrites five frames:
-
-| Frame | What happens |
+| Tag | ID3 frame |
 |---|---|
-| `POPM` | Removed outright |
-| `TSSE` | Removed outright |
-| `TYER` | Removed outright, leaving the complete `TDRC` date |
-| `TCOP` | Set to the copyright message looked up on iTunes |
-| `TLAN` | Set to the name of the language detected from the lyrics, or `--language` |
+| Title | `TIT2` |
+| Artist | `TPE1` |
+| Album | `TALB` |
+| Comment | `COMM` |
+| Date | `TDRC` |
+| Track Number | `TRCK` |
+| Genre | `TCON` |
+| Album Artist | `TPE2` |
+| Copyright | `TCOP` |
+| Disc Number | `TPOS` |
+| ISRC | `TSRC` |
+| Language | `TLAN` |
+| Lyrics | `USLT` |
+| Picture: Cover (front) | `APIC` with type `CoverFront` |
+| WWW Audio Source | `WOAS` |
 
-Dropping `TYER` leaves the date in a v2.4 frame inside a v2.3 tag, which
-Mp3tag, foobar2000, MusicBee, VLC, Plex, and Jellyfin all read. Strict v2.3
-readers — Windows Explorer's Year column, Windows Media Player, and some older
-car head units and portable players — look only at `TYER` and will show no
-year. Keep it by removing `"TYER"` from `STRIPPED_FRAMES` in `src/metadata.rs`
-if your players need it.
-
-Removal happens after spotDL is finished with the file, so it catches whatever
-FFmpeg wrote during the transcode. Files downloaded before this existed can be
-cleaned up with the `delete` command:
-
-```bash
-music-tag-transfer delete "/path/to/music" "[Encoding Settings, Year]"
-```
-
-`TSRC` is deliberately **not** touched. spotDL already fills the ISRC from its
-own metadata, and iTunes publishes no ISRCs, so whatever spotDL wrote is left
-in place.
+Other `APIC` picture types, such as back covers and artist images, are also
+deleted. A tag on this list is kept when the source provides it; token-free
+downloads can legitimately have no `TSRC`, because spotDL's token-free client
+does not return an ISRC. `TCOP` and `TLAN` are filled by this program, and the
+cleaned synced lyrics are written to `USLT`.
 
 #### Copyright
 
@@ -421,21 +406,23 @@ Every download asks spotDL for time-synced lyrics and for the `.lrc` file that
 carries them — `--lyrics synced --generate-lrc`, on every line of the input
 file, with no way to turn it off.
 
-After each successful download that `.lrc` file is pasted into the tag, in the
-same write as the rating and copyright changes above:
+After each successful download that `.lrc` file is pasted into the tag during
+the same metadata rewrite that applies the whitelist:
 
-1. The `.lrc` file sitting beside the audio is read and its text is trimmed.
-2. That text is written to the ID3v2.3 `USLT` lyrics frame **verbatim**,
-   `[mm:ss.xx]` timestamps and all. Any previous `USLT` frame is replaced.
-3. Every `SYLT` synchronised-lyrics frame is removed, including the one spotDL
-   writes itself whenever its lyrics arrive in LRC format.
-4. The file is read back from disk. Only if the stored `USLT` frame matches the
-   `.lrc` file, and no `SYLT` frame survives, is the `.lrc` file deleted.
+1. The `.lrc` file sitting beside the audio is read.
+2. Empty lines and lines containing only timestamps, such as `[00:00:00]` or
+   `[00:12.50][00:42.50]`, are removed.
+3. The cleaned text is written to the ID3v2.3 `USLT` lyrics frame. Timestamps
+   attached to real lyric lines remain intact, and any previous `USLT` is
+   replaced.
+4. Every `SYLT` synchronised-lyrics frame is removed, including spotDL's.
+5. The file is read back from disk. Only if the stored `USLT` frame matches the
+   cleaned text, and no `SYLT` frame survives, is the `.lrc` file deleted.
 
 `USLT` is the frame players actually read; `SYLT` is the one most of them
 ignore. Players that do understand timed lyrics parse the timestamps out of the
-`USLT` text, so keeping the `.lrc` text as it came is what makes the lyrics show
-up in both kinds of player.
+`USLT` text, so retaining the timestamps attached to lyric lines makes the
+lyrics show up in both kinds of player.
 
 Only the language detector sees the lyrics without their timestamps — the
 `[mm:ss.xx]` prefixes and any `[ar:...]` metadata header would only mislead it.
@@ -443,10 +430,10 @@ Only the language detector sees the lyrics without their timestamps — the
 If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
 never the thing that gets lost, nothing is written to the audio file, and the
 line it belongs to is reported as failed so it appears in the retry list. An
-empty `.lrc` file is the only content that counts as a failure; an untimed one
-is pasted like any other. A line for which spotDL generated no `.lrc` file is
-not a failure either: the rating and copyright changes are still applied, and
-there were simply no synced lyrics to paste.
+`.lrc` file with no content left after cleaning counts as a failure; an untimed
+one is pasted like any other. A line for which spotDL generated no `.lrc` file
+is not a failure either: the metadata whitelist is still applied, and there
+were simply no synced lyrics to paste.
 
 ### How downloaded files are found again
 
@@ -511,35 +498,21 @@ If spotDL reports that Deno is required:
 - `--auto-download-deno` approves that setup automatically;
 - `--non-interactive` without automatic setup stops and preserves the lines.
 
-### The token prompt
+### Optional Spotify token
 
-Before the first download, an interactive run asks for a Spotify access token:
+The command no longer asks for a token before downloading. With no token
+option or environment variable, it immediately uses spotDL's token-free
+client. To use a token, supply exactly one of these:
 
-```text
-Spotify metadata source
-  A token switches this run to Spotify's official Web API, the only source for
-  the ISRC (TSRC) frame; spotDL's token-free client always reports an empty one.
-  A developer-app token needs the app owner to have Spotify Premium; a token
-  copied from the open.spotify.com web player does not, but expires within the
-  hour, and this command will ask again when it does.
-  Never enter your password or Client Secret.
-Paste an access token, or press Enter to download token-free:
+```bash
+music-tag-transfer download links.txt --auth-token 'short-lived-access-token'
+music-tag-transfer download links.txt --token-file ./spotify-token.txt
+SPOTIFY_AUTH_TOKEN='short-lived-access-token' music-tag-transfer download links.txt
 ```
 
-Pressing Enter is a valid answer and keeps the default token-free mode, so the
-prompt is an offer rather than a requirement. Pasting a token switches the run
-to Spotify's official Web API, because a token is only ever passed to spotDL
-alongside `--use-official-api`. A malformed token is reported and asked for
-again, up to three times.
-
-The token may be pasted in any of the forms devtools hands you — a bare token,
-`Bearer ...`, or a quoted `const token = '...'` assignment.
-
-The prompt is skipped, leaving behaviour exactly as it was, when:
-
-- `--auth-token`, `--token-file`, or `SPOTIFY_AUTH_TOKEN` already supplied one;
-- `--non-interactive` was passed;
-- stdin is not a terminal, as in a cron job or a pipeline.
+Any of these automatically enables `--use-official-api`; `--official-api` does
+not have to be supplied separately. The token may be a bare value, `Bearer
+...`, or a quoted `const token = '...'` assignment.
 
 Which token you can use depends on where it came from. A token issued to a
 developer-mode Spotify app requires the **app owner to hold an active Premium
@@ -559,11 +532,12 @@ Before downloading, it checks spotDL's active `config.json` and stops if
 `auth_token` would silently change that behavior. Disable config loading or
 clear those settings before retrying.
 
-Use the official API only as an explicit fallback:
+Use the official API only as an explicit fallback. Supplying a token selects
+it automatically:
 
 ```bash
 SPOTIFY_AUTH_TOKEN='short-lived-access-token' \
-  music-tag-transfer download --official-api links.txt
+  music-tag-transfer download links.txt
 ```
 
 Official-mode token precedence is:
@@ -572,10 +546,10 @@ Official-mode token precedence is:
 2. `--token-file`;
 3. `SPOTIFY_AUTH_TOKEN`.
 
-`--auth-token` and `--token-file` are rejected unless `--official-api`
-is present. Token files may contain a plain token, a `Bearer ...` value, or a
-quoted JavaScript-style token assignment. Protect these files and never commit
-tokens, cookies, Client Secrets, or other credentials.
+`--auth-token` and `--token-file` are mutually exclusive. Token files may
+contain a plain token, a `Bearer ...` value, or a quoted JavaScript-style token
+assignment. Protect these files and never commit tokens, cookies, Client
+Secrets, or other credentials.
 
 When an official token expires, an interactive terminal can request a
 replacement. `--non-interactive` disables this prompt.

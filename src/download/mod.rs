@@ -23,8 +23,8 @@ const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
 /// Download every unique line in `config.input` through spotDL, then rewrite
-/// each file's ID3v2.3 tag: drop the POPM rating, store the Spotify copyright,
-/// and paste the generated `.lrc` file into the ordinary USLT lyrics frame.
+/// each file's ID3v2.3 tag: retain the requested 15 metadata types, store the
+/// copyright, and paste cleaned `.lrc` text into the ordinary USLT frame.
 ///
 /// A line is a Spotify URL, a YouTube Music URL, or a
 /// `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pair, and the three may
@@ -66,10 +66,8 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     }
     println!("Downloads will be stored in {}.", config.output.display());
 
-    // The token is asked for before anything is downloaded, because it decides
-    // which Spotify metadata source the whole run uses.
     let interactive = !config.non_interactive && io::stdin().is_terminal();
-    let mut auth_token = startup_token(&mut config, interactive)?;
+    let mut auth_token = startup_token(&mut config)?;
 
     // Only a token-free run can be silently turned into an official one by
     // spotDL's own config, so this check waits until the mode is settled.
@@ -176,7 +174,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     println!("\nCompleted: {completed}");
     println!("Failed: {}", failures.len());
     println!(
-        "Metadata: updated {} file(s); stripped {} rating/encoder/year frame(s); wrote {} copyright message(s); {} language(s) came from MusicBrainz and {} from the lyrics.",
+        "Metadata: updated {} file(s); removed {} non-whitelisted frame(s); wrote {} copyright message(s); {} language(s) came from MusicBrainz and {} from the lyrics.",
         metadata_totals.files_updated,
         metadata_totals.frames_stripped,
         metadata_totals.copyrights_written,
@@ -357,7 +355,7 @@ fn apply_metadata(
             "taken from --language"
         };
         println!(
-            "Updated the tag: stripped {} rating/encoder/year frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
+            "Updated the tag: removed {} non-whitelisted frame(s), wrote {} copyright message(s), language {language}{lyrics}.",
             report.frames_stripped, report.copyrights_written
         );
     }
@@ -425,41 +423,14 @@ fn album_copyright(client: &mut ItunesClient, audio: &Path) -> Result<Option<Str
     Ok(copyright)
 }
 
-/// The token this run starts with, asking for one when nothing supplied it.
-///
-/// The prompt is skipped when a token already came from an option, a file, or
-/// the environment, and when the run is not interactive, so scripted runs
-/// behave exactly as before.
-fn startup_token(config: &mut Config, interactive: bool) -> Result<Option<String>, String> {
-    if let Some(token) = initial_token(config)? {
-        return Ok(Some(token));
-    }
-    if !interactive {
-        return Ok(None);
-    }
-
-    let mut attempt = 1;
-    loop {
-        match token::prompt_before_downloading() {
-            Ok(token) => return Ok(adopt_token(config, token)),
-            Err(error) if attempt < MAX_TOKEN_PROMPTS => {
-                eprintln!("Invalid token: {error}");
-                attempt += 1;
-            }
-            Err(error) => {
-                return Err(format!(
-                    "invalid token after {MAX_TOKEN_PROMPTS} attempts: {error}"
-                ));
-            }
-        }
-    }
+/// Resolve an optional token. With no option, file, or environment value, the
+/// run stays token-free and starts without asking a question.
+fn startup_token(config: &mut Config) -> Result<Option<String>, String> {
+    let token = initial_token(config)?;
+    Ok(adopt_token(config, token))
 }
 
-/// Fold the answer to the startup prompt into the run's configuration.
-///
-/// Supplying a token is what turns official mode on, because a token is only
-/// ever passed to spotDL alongside `--use-official-api`. An empty answer leaves
-/// the default token-free mode alone.
+/// Fold an optional configured token into the run's mode.
 fn adopt_token(config: &mut Config, token: Option<String>) -> Option<String> {
     if token.is_some() {
         config.official_api = true;
@@ -468,9 +439,6 @@ fn adopt_token(config: &mut Config, token: Option<String>) -> Option<String> {
 }
 
 fn initial_token(config: &Config) -> Result<Option<String>, String> {
-    if !config.official_api {
-        return Ok(None);
-    }
     if let Some(raw_token) = &config.auth_token {
         return token::clean_token(raw_token).map(Some);
     }
@@ -806,16 +774,15 @@ mod tests {
     }
 
     #[test]
-    fn declining_the_prompt_keeps_the_token_free_default() {
+    fn no_supplied_token_keeps_the_token_free_default() {
         let mut config = config();
         assert_eq!(adopt_token(&mut config, None), None);
         assert!(!config.official_api);
     }
 
     #[test]
-    fn an_option_supplied_token_is_used_without_prompting() {
+    fn an_option_supplied_token_is_used() {
         let mut config = config();
-        config.official_api = true;
         config.auth_token = Some("Bearer test-token-12345678901234567890".into());
 
         assert_eq!(

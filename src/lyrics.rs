@@ -2,8 +2,8 @@
 //!
 //! `--generate-lrc` leaves the timed lyrics in a `.lrc` file beside the audio.
 //! That file's text is what goes into the ordinary `USLT` lyrics frame, so
-//! these helpers only have to read it and guess its language; the timestamps
-//! travel with the text rather than being encoded into a `SYLT` frame.
+//! these helpers clean it and guess its language; useful timestamps travel
+//! with the text rather than being encoded into a `SYLT` frame.
 
 use whatlang::Lang;
 
@@ -117,14 +117,68 @@ fn iso_639_2(code: &str) -> &str {
 
 /// The lyric text of a `.lrc` file, without timestamps or `[ar:...]` metadata.
 ///
-/// Only the language detector needs the text on its own; the frame itself keeps
-/// the file verbatim, timestamps included. A file whose lines carry no
-/// timestamp is not a special case — stripping finds nothing to remove.
+/// Only the language detector needs the text on its own; the embedded frame
+/// keeps timestamps that accompany real lyric lines. A file whose lines carry
+/// no timestamp is not a special case — stripping finds nothing to remove.
 pub(crate) fn lyric_lines(text: &str) -> Vec<&str> {
     text.lines()
         .map(|line| strip_leading_brackets(line).trim())
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+/// Remove lines that carry no lyric text before embedding an LRC file.
+///
+/// Blank lines and lines made only from one or more LRC timestamps add no
+/// information and create visible gaps in players. Metadata headers such as
+/// `[ar: Artist]` are preserved because they are not timestamps.
+pub(crate) fn clean_lyrics(text: &str) -> String {
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty() && !is_timestamp_only(trimmed)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_timestamp_only(line: &str) -> bool {
+    let mut rest = line.trim_start_matches('\u{feff}').trim();
+    let mut found_timestamp = false;
+    while let Some(after_open) = rest.strip_prefix('[') {
+        let Some(end) = after_open.find(']') else {
+            return false;
+        };
+        if !is_timestamp(&after_open[..end]) {
+            return false;
+        }
+        found_timestamp = true;
+        rest = after_open[end + 1..].trim();
+    }
+    found_timestamp && rest.is_empty()
+}
+
+fn is_timestamp(value: &str) -> bool {
+    let parts = value.split(':').collect::<Vec<_>>();
+    if !(2..=3).contains(&parts.len()) {
+        return false;
+    }
+    parts[..parts.len() - 1]
+        .iter()
+        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+        && is_seconds(parts[parts.len() - 1])
+}
+
+fn is_seconds(value: &str) -> bool {
+    let mut pieces = value.split(['.', ',']);
+    let Some(seconds) = pieces.next() else {
+        return false;
+    };
+    let fraction = pieces.next();
+    pieces.next().is_none()
+        && !seconds.is_empty()
+        && seconds.chars().all(|c| c.is_ascii_digit())
+        && fraction.is_none_or(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Drop the leading `[...]` groups an LRC line begins with.
@@ -171,6 +225,23 @@ mod tests {
     #[test]
     fn a_metadata_only_file_produces_nothing() {
         assert!(lyric_lines("[ar: Artist]\n[al: Album]\n\n").is_empty());
+    }
+
+    #[test]
+    fn embedded_lyrics_drop_blank_and_timestamp_only_lines() {
+        let lrc = "\u{feff}[ar: Artist]\n\n[00:00:00]\n[00:01.25] first line \n[00:02,50][00:05.00]\n[00:03.00]second\n";
+        assert_eq!(
+            clean_lyrics(lrc),
+            "\u{feff}[ar: Artist]\n[00:01.25] first line \n[00:03.00]second"
+        );
+    }
+
+    #[test]
+    fn bracketed_non_timestamps_are_not_removed() {
+        assert_eq!(
+            clean_lyrics("[Verse 1]\n[ar: Artist]\n"),
+            "[Verse 1]\n[ar: Artist]"
+        );
     }
 
     #[test]

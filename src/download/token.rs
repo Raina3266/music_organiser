@@ -75,25 +75,6 @@ pub(super) fn prompt_for_token(reason: &str) -> Result<Option<String>, String> {
     read_token("Paste the token, or press Enter to cancel: ")
 }
 
-/// Ask for an access token before the first download.
-///
-/// An empty answer is a valid one: it keeps the default token-free mode, so
-/// this is an offer rather than a requirement. The wording says what the token
-/// buys and what it costs, because the two kinds of token differ: a token
-/// issued to a developer-mode app requires the app owner to hold Spotify
-/// Premium, while one copied from the web player does not but expires quickly.
-pub(super) fn prompt_before_downloading() -> Result<Option<String>, String> {
-    eprintln!();
-    eprintln!("Spotify metadata source");
-    eprintln!("  A token switches this run to Spotify's official Web API, the only source for");
-    eprintln!("  the ISRC (TSRC) frame; spotDL's token-free client always reports an empty one.");
-    eprintln!("  A developer-app token needs the app owner to have Spotify Premium; a token");
-    eprintln!("  copied from the open.spotify.com web player does not, but expires within the");
-    eprintln!("  hour, and this command will ask again when it does.");
-    eprintln!("  Never enter your password or Client Secret.");
-    read_token("Paste an access token, or press Enter to download token-free: ")
-}
-
 /// Ask one question and clean whatever was typed.
 ///
 /// End of input counts as an empty answer, so a closed stdin declines rather

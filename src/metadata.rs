@@ -1,11 +1,10 @@
 //! Rewrite the ID3 tag spotDL leaves behind.
 //!
-//! Each downloaded file gets one tag update that: drops the unwanted `POPM`
-//! rating and `TSSE` encoder-settings frames, sets the
-//! `TCOP` copyright message fetched from the iTunes Search API, records the
-//! `TLAN` language, and pastes the `.lrc` sidecar into the ordinary `USLT`
-//! lyrics frame while removing any `SYLT` synchronised-lyrics frame. The result
-//! is read back from disk before the `.lrc` file is deleted.
+//! Each downloaded file gets one tag update that keeps only the 15 requested
+//! metadata types, sets the `TCOP` copyright message fetched from the iTunes
+//! Search API, records the `TLAN` language, and pastes the cleaned `.lrc`
+//! sidecar into the ordinary `USLT` lyrics frame. The result is read back from
+//! disk before the `.lrc` file is deleted.
 //!
 //! The lyrics keep their `[mm:ss.xx]` timestamps: `USLT` is the frame players
 //! actually read, and the ones that understand timed lyrics parse them out of
@@ -21,26 +20,35 @@ use std::{
 
 use id3::{
     ErrorKind, Frame, Tag, TagLike, Version,
-    frame::{Content, Lyrics},
+    frame::{Content, Lyrics, PictureType},
 };
 
 use crate::AlbumEvidence;
 use crate::files::{FileError, sibling_lyrics_file, write_tag_safely};
-use crate::lyrics::{LYRICS_DESCRIPTION, Language, detect_language, lyric_lines};
+use crate::lyrics::{LYRICS_DESCRIPTION, Language, clean_lyrics, detect_language, lyric_lines};
 
 /// Frames are written as ID3v2.3, matching the rest of this project.
 pub(crate) const TAG_VERSION: Version = Version::Id3v23;
-/// Frames removed from every download.
+/// The complete whitelist for every downloaded file.
 ///
-/// `POPM` is the popularimeter spotDL fills from Spotify's popularity score —
-/// the frame taggers display as a rating. `TSSE` is the encoder-settings string
-/// FFmpeg leaves behind, which describes the transcode rather than the music.
-///
-/// `TYER` is the release year. spotDL writes it beside the full `TDRC`
-/// recording date it also writes, so the year is the same information a second
-/// time with the day and month thrown away, and taggers show the pair as two
-/// competing date fields. `TDRC` is kept because it is the complete one.
-const STRIPPED_FRAMES: &[&str] = &["POPM", "TSSE", "TYER"];
+/// APIC is narrowed further to front-cover pictures by `is_allowed_frame`.
+const ALLOWED_FRAMES: &[&str] = &[
+    "TIT2", // Title
+    "TPE1", // Artist
+    "TALB", // Album
+    "COMM", // Comment
+    "TDRC", // Date
+    "TRCK", // Track Number
+    "TCON", // Genre
+    "TPE2", // Album Artist
+    "TCOP", // Copyright
+    "TPOS", // Disc Number
+    "TSRC", // ISRC
+    "TLAN", // Language
+    "USLT", // Lyrics
+    "APIC", // Picture: Cover (front)
+    "WOAS", // WWW Audio Source
+];
 /// The copyright message frame.
 pub(crate) const COPYRIGHT_FRAME: &str = "TCOP";
 /// The ISRC frame, which spotDL fills only when it used the official API.
@@ -53,7 +61,8 @@ const LANGUAGE_FRAME: &str = "TLAN";
 pub struct MetadataReport {
     /// Audio files whose tag was rewritten.
     pub files_updated: usize,
-    /// Unwanted frames removed; see `STRIPPED_FRAMES`.
+    /// Frames removed because they were outside `ALLOWED_FRAMES`, or because
+    /// an APIC picture was not a front cover.
     pub frames_stripped: usize,
     /// Files that received a `TCOP` copyright message.
     pub copyrights_written: usize,
@@ -147,9 +156,12 @@ pub fn finalize(
     if let Some(sidecar) = &sidecar {
         match fs::read(sidecar) {
             Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).trim().to_owned();
+                let text = clean_lyrics(&String::from_utf8_lossy(&bytes));
                 if text.is_empty() {
-                    report.fail(sidecar.clone(), "the .lrc file is empty");
+                    report.fail(
+                        sidecar.clone(),
+                        "the .lrc file has no lyrics after empty and timestamp-only lines are removed",
+                    );
                     return report;
                 }
                 // Only guess when nothing authoritative was supplied: a
@@ -173,14 +185,9 @@ pub fn finalize(
         }
     }
 
-    let frames_stripped = STRIPPED_FRAMES
-        .iter()
-        .map(|frame_id| tag.remove(frame_id).len())
-        .sum::<usize>();
     // spotDL writes a SYLT frame of its own whenever its lyrics arrive in LRC
     // format, so this removal is not only about undoing earlier runs.
     let sylt_removed = tag.synchronised_lyrics().count();
-    tag.remove_all_synchronised_lyrics();
     set_text(&mut tag, COPYRIGHT_FRAME, copyright);
     set_text(&mut tag, LANGUAGE_FRAME, Some(language.name.as_str()));
     if let Some(lyrics) = &lyrics {
@@ -191,6 +198,7 @@ pub fn finalize(
             text: lyrics.clone(),
         });
     }
+    let frames_stripped = retain_allowed_frames(&mut tag);
 
     if let Err(error) = write_tag_safely(audio, &tag, TAG_VERSION) {
         report.fail(
@@ -318,6 +326,32 @@ pub(crate) fn set_text(tag: &mut Tag, frame_id: &str, value: Option<&str>) {
     ));
 }
 
+fn retain_allowed_frames(tag: &mut Tag) -> usize {
+    let original_count = tag.frames().count();
+    let retained = tag
+        .frames()
+        .filter(|frame| is_allowed_frame(frame))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut clean = Tag::with_version(TAG_VERSION);
+    for frame in retained {
+        clean.add_frame(frame);
+    }
+    let retained_count = clean.frames().count();
+    *tag = clean;
+    original_count.saturating_sub(retained_count)
+}
+
+fn is_allowed_frame(frame: &Frame) -> bool {
+    if !ALLOWED_FRAMES.contains(&frame.id()) {
+        return false;
+    }
+    match frame.content() {
+        Content::Picture(picture) => picture.picture_type == PictureType::CoverFront,
+        _ => true,
+    }
+}
+
 /// Read `audio` back from disk and confirm every rule actually took effect.
 fn verify(
     audio: &Path,
@@ -328,11 +362,11 @@ fn verify(
     let tag = Tag::read_from_path(audio)
         .map_err(|error| format!("cannot re-read the file to verify its tag: {error}"))?;
 
-    if let Some(frame_id) = STRIPPED_FRAMES
-        .iter()
-        .find(|frame_id| tag.get(frame_id).is_some())
-    {
-        return Err(format!("the {frame_id} frame is still present"));
+    if let Some(frame) = tag.frames().find(|frame| !is_allowed_frame(frame)) {
+        return Err(format!(
+            "the disallowed {} frame is still present",
+            frame.id()
+        ));
     }
 
     for (frame_id, expected, label) in [
@@ -372,7 +406,9 @@ fn verify(
 mod tests {
     use super::*;
     use crate::lyrics::parse_language;
-    use id3::frame::{Popularimeter, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat};
+    use id3::frame::{
+        Picture, Popularimeter, SynchronisedLyrics, SynchronisedLyricsType, TimestampFormat,
+    };
 
     fn english() -> Language {
         parse_language("English").unwrap()
@@ -452,6 +488,40 @@ mod tests {
     }
 
     #[test]
+    fn keeps_exactly_the_requested_frames_and_only_a_front_cover() {
+        assert_eq!(ALLOWED_FRAMES.len(), 15);
+        let mut tag = Tag::new();
+        tag.add_frame(Frame::text("TIT2", "Song"));
+        tag.add_frame(Frame::text(
+            "WOAS",
+            "https://open.spotify.com/track/example",
+        ));
+        tag.add_frame(Frame::text("TENC", "encoder"));
+        tag.add_frame(Picture {
+            mime_type: "image/jpeg".to_owned(),
+            picture_type: PictureType::CoverFront,
+            description: String::new(),
+            data: vec![1, 2, 3],
+        });
+        tag.add_frame(Picture {
+            mime_type: "image/jpeg".to_owned(),
+            picture_type: PictureType::CoverBack,
+            description: String::new(),
+            data: vec![4, 5, 6],
+        });
+
+        assert_eq!(retain_allowed_frames(&mut tag), 2);
+        assert!(tag.get("TIT2").is_some());
+        assert!(tag.get("WOAS").is_some());
+        assert!(tag.get("TENC").is_none());
+        assert_eq!(tag.pictures().count(), 1);
+        assert_eq!(
+            tag.pictures().next().unwrap().picture_type,
+            PictureType::CoverFront
+        );
+    }
+
+    #[test]
     fn strips_the_unwanted_frames_fills_the_copyright_and_pastes_the_lyrics() {
         let directory = TempDir::new("finalize");
         let audio = directory.0.join("Artist - Song [abc123].mp3");
@@ -459,7 +529,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(
             &sidecar,
-            "[ar: Artist]\n[00:01.00]first\n[00:02.50]second\n",
+            "[ar: Artist]\n\n[00:00:00]\n[00:01.00]first\n[00:02.50]second\n[00:03.00]\n",
         )
         .unwrap();
 
@@ -471,7 +541,7 @@ mod tests {
         );
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.files_updated, 1);
-        assert_eq!(report.frames_stripped, 3);
+        assert_eq!(report.frames_stripped, 4);
         assert_eq!(report.copyrights_written, 1);
         assert_eq!(report.lyrics_embedded, 1);
         assert_eq!(report.lines_embedded, 2);
@@ -539,7 +609,7 @@ mod tests {
 
         let report = finalize(&audio, None, None, &english());
         assert_eq!(report.failures, Vec::new());
-        assert_eq!(report.frames_stripped, 3);
+        assert_eq!(report.frames_stripped, 4);
         assert_eq!(report.lyrics_embedded, 0);
         assert_eq!(report.copyrights_written, 0);
 
