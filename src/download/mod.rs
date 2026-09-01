@@ -1,6 +1,8 @@
 pub mod cli;
 mod input;
+pub mod odesli;
 mod output;
+pub mod resolve;
 mod spotdl;
 pub(crate) mod token;
 

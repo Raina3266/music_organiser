@@ -8,7 +8,7 @@
 //! asks for it when it is not told.
 
 pub mod discogs;
-mod http;
+pub(crate) mod http;
 pub mod itunes;
 pub mod menu;
 pub mod musicbrainz;
@@ -42,7 +42,7 @@ impl Default for Limits {
     }
 }
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;
 
 use crate::{AlbumEvidence, CopyrightLookup, LookupError};
 

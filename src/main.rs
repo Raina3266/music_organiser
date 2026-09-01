@@ -42,6 +42,14 @@ fn run() -> Result<ExitCode, String> {
                 ExitCode::from(1)
             })
         }
+        Command::Resolve(config) => {
+            let code = download::resolve::run(config)?;
+            Ok(if code == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
         Command::Delete {
             folder,
             tags,

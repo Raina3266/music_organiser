@@ -112,6 +112,12 @@ impl InputList {
     }
 }
 
+/// Parse an input file's text, for tests that build one rather than read it.
+#[cfg(test)]
+pub(super) fn parse_for_test(contents: &str) -> Result<InputList, String> {
+    parse(contents)
+}
+
 pub(super) fn load(path: &Path) -> Result<InputList, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
@@ -178,6 +184,20 @@ fn parse(contents: &str) -> Result<InputList, String> {
 struct Normalized {
     query: String,
     source: Source,
+}
+
+/// Build the pair line that names `spotify` as the metadata and `youtube` as
+/// the audio.
+///
+/// The resolver hands over one URL it read from an input file and one it was
+/// given by Odesli, so both go through the same validation an input file gets.
+/// That way a resolved file cannot contain a line `download` would later
+/// reject, and the pair comes back in the order spotDL reads.
+pub(super) fn pair_line(spotify: &str, youtube: &str) -> Result<String, String> {
+    if youtube.contains(PAIR_SEPARATOR) || spotify.contains(PAIR_SEPARATOR) {
+        return Err(format!("a URL contains the {PAIR_SEPARATOR:?} separator"));
+    }
+    Ok(normalize_pair(&format!("{youtube}{PAIR_SEPARATOR}{spotify}"))?.query)
 }
 
 /// Validate one input line, whichever of the three forms it uses.

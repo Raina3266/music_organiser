@@ -1,6 +1,12 @@
-use std::{collections::HashSet, ffi::OsString, path::PathBuf};
+use std::{
+    collections::HashSet,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::download::cli::{self as download_cli, ParsedCommand as DownloadCommand};
+use crate::download::odesli;
+use crate::download::resolve;
 use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
 use crate::sources::{Limits, Source};
@@ -22,9 +28,13 @@ USAGE:
     ",
     env!("CARGO_PKG_NAME"),
     " copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
+    ",
+    env!("CARGO_PKG_NAME"),
+    " resolve <INPUT_FILE> [OUTPUT_FILE] [--api-key KEY] [--country XX]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
+    resolve     Pin Spotify links to their YouTube Music track through Odesli
     delete      Remove selected ID3 tags from a folder recursively
     export      Write every ID3 frame under a folder to one CSV file
     copyright   Look the TCOP copyright message up again in a music catalogue
@@ -36,6 +46,9 @@ EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
     " delete \"/music\" \"[Encoded-by, Album Artist]\"
+    ",
+    env!("CARGO_PKG_NAME"),
+    " resolve links.txt pinned.txt
     ",
     env!("CARGO_PKG_NAME"),
     " export \"/music\" frames.csv
@@ -50,9 +63,17 @@ EXAMPLES:
     " copyright \"/music\" --dry-run --csv changes.csv
 
 The download command reads one link per line and forces MP3 with synced
-lyrics. A line is a Spotify URL, a YouTube Music URL, or an exact-source pair of
-the two written in either order, and one file may mix all three. It then cleans and embeds the generated .lrc text and limits each
-ID3v2.3 tag to the 15 supported metadata types.
+lyrics. A line is a Spotify URL, a YouTube Music URL, or an exact-source pair
+of the two written in either order, and one file may mix all three. It then
+cleans and embeds the generated .lrc text and limits each ID3v2.3 tag to the
+15 supported metadata types.
+
+The resolve command reads the same kind of file and writes another one, asking
+Odesli (song.link) which YouTube Music track each bare Spotify track is. A
+track it can place becomes an exact-source pair, so spotDL downloads that
+recording instead of searching for one; a track it cannot place is left alone.
+The free tier allows ten requests a minute, so ODESLI_API_KEY, --api-key, or
+--api-key-file is worth having for a long file.
 
 Downloads are token-free by default. Supplying --auth-token, --token-file, or
 SPOTIFY_AUTH_TOKEN automatically enables Spotify's official API; no separate
@@ -131,6 +152,7 @@ pub enum Command {
         output: PathBuf,
         overwrite: bool,
     },
+    Resolve(resolve::Config),
     Copyright {
         folder: PathBuf,
         /// The catalogues to ask, in order. `None` means nobody has chosen
@@ -171,6 +193,7 @@ where
         "delete" => parse_delete(&args[1..]),
         "export" => parse_export(&args[1..]),
         "copyright" => parse_copyright(&args[1..]),
+        "resolve" => parse_resolve(&args[1..]),
         _ => Err(format!("unknown command {command:?}")),
     }
 }
@@ -346,6 +369,109 @@ fn parse_copyright(args: &[OsString]) -> Result<Command, String> {
     })
 }
 
+/// Where a resolved file goes when no path was given: beside the input, under
+/// a name that says what it is.
+fn default_resolved_path(input: &Path) -> PathBuf {
+    let stem = input.file_stem().map_or_else(
+        || "links".to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    let extension = input.extension().map_or_else(
+        || "txt".to_owned(),
+        |value| value.to_string_lossy().into_owned(),
+    );
+    input.with_file_name(format!("{stem}-resolved.{extension}"))
+}
+
+fn parse_resolve(args: &[OsString]) -> Result<Command, String> {
+    let mut positional = Vec::new();
+    let mut overwrite = false;
+    let mut api_key = None;
+    let mut api_key_file = None;
+    let mut country = odesli::DEFAULT_COUNTRY.to_owned();
+    let mut limits = Limits::default();
+
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy().into_owned();
+        match argument.as_str() {
+            "--overwrite" => overwrite = true,
+            "--api-key" => api_key = Some(next_value(args, &mut index, "--api-key")?),
+            "--api-key-file" => {
+                api_key_file = Some(PathBuf::from(next_value(
+                    args,
+                    &mut index,
+                    "--api-key-file",
+                )?));
+            }
+            "--country" => country = next_value(args, &mut index, "--country")?,
+            "--max-wait" => {
+                limits.max_wait = next_value(args, &mut index, "--max-wait")?
+                    .parse()
+                    .map_err(|_| "--max-wait expects a number of seconds".to_owned())?;
+            }
+            "--max-attempts" => {
+                let attempts: u32 = next_value(args, &mut index, "--max-attempts")?
+                    .parse()
+                    .map_err(|_| "--max-attempts expects a number".to_owned())?;
+                if attempts == 0 {
+                    return Err("--max-attempts must be at least 1".to_owned());
+                }
+                limits.max_attempts = attempts;
+            }
+            "--max-throttle-retries" => {
+                let retries: u32 = next_value(args, &mut index, "--max-throttle-retries")?
+                    .parse()
+                    .map_err(|_| "--max-throttle-retries expects a number".to_owned())?;
+                if retries == 0 {
+                    return Err("--max-throttle-retries must be at least 1".to_owned());
+                }
+                limits.max_throttle_retries = retries;
+            }
+            _ if argument.starts_with("--api-key=") => {
+                api_key = Some(argument["--api-key=".len()..].to_owned());
+            }
+            _ if argument.starts_with("--api-key-file=") => {
+                api_key_file = Some(PathBuf::from(&argument["--api-key-file=".len()..]));
+            }
+            _ if argument.starts_with("--country=") => {
+                country = argument["--country=".len()..].to_owned();
+            }
+            _ if argument.starts_with('-') => {
+                return Err(format!("unknown option {argument:?}"));
+            }
+            _ => positional.push(&args[index]),
+        }
+        index += 1;
+    }
+
+    let input = match positional.len() {
+        1 | 2 => PathBuf::from(positional[0]),
+        _ => {
+            return Err("resolve requires an input file and an optional output path".to_owned());
+        }
+    };
+    if api_key.is_some() && api_key_file.is_some() {
+        return Err("give --api-key or --api-key-file, not both".to_owned());
+    }
+    let output = positional
+        .get(1)
+        .map_or_else(|| default_resolved_path(&input), PathBuf::from);
+    if output == input {
+        return Err("the resolved file would overwrite the input file".to_owned());
+    }
+
+    Ok(Command::Resolve(resolve::Config {
+        input,
+        output,
+        overwrite,
+        api_key,
+        api_key_file,
+        country,
+        limits,
+    }))
+}
+
 /// The value that follows an option, advancing past it.
 fn next_value(args: &[OsString], index: &mut usize, option: &str) -> Result<String, String> {
     *index += 1;
@@ -393,6 +519,80 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parses_resolve_with_its_defaults() {
+        let Command::Resolve(config) = parse_args(strings(&["resolve", "links.txt"])).unwrap()
+        else {
+            panic!("expected a resolve command");
+        };
+
+        assert_eq!(config.input, PathBuf::from("links.txt"));
+        // No output path given, so one is derived beside the input.
+        assert_eq!(config.output, PathBuf::from("links-resolved.txt"));
+        assert_eq!(config.country, odesli::DEFAULT_COUNTRY);
+        assert_eq!(config.api_key, None);
+        assert!(!config.overwrite);
+        assert_eq!(config.limits, Limits::default());
+    }
+
+    #[test]
+    fn parses_resolve_options_in_both_spellings() {
+        let Command::Resolve(config) = parse_args(strings(&[
+            "resolve",
+            "/music/links.txt",
+            "/music/pinned.txt",
+            "--overwrite",
+            "--api-key=secret",
+            "--country",
+            "GB",
+            "--max-attempts",
+            "2",
+        ]))
+        .unwrap() else {
+            panic!("expected a resolve command");
+        };
+
+        assert_eq!(config.input, PathBuf::from("/music/links.txt"));
+        assert_eq!(config.output, PathBuf::from("/music/pinned.txt"));
+        assert!(config.overwrite);
+        assert_eq!(config.api_key.as_deref(), Some("secret"));
+        assert_eq!(config.country, "GB");
+        assert_eq!(config.limits.max_attempts, 2);
+    }
+
+    /// The derived output goes beside the input, not into the working
+    /// directory, so resolving a file by absolute path lands next to it.
+    #[test]
+    fn the_derived_output_keeps_the_input_folder_and_extension() {
+        let Command::Resolve(config) =
+            parse_args(strings(&["resolve", "/music/spotify.list"])).unwrap()
+        else {
+            panic!("expected a resolve command");
+        };
+
+        assert_eq!(config.output, PathBuf::from("/music/spotify-resolved.list"));
+    }
+
+    #[test]
+    fn rejects_resolve_arguments_that_would_lose_the_input() {
+        // Writing over the file being read would destroy it halfway through.
+        assert!(parse_args(strings(&["resolve", "links.txt", "links.txt"])).is_err());
+        assert!(
+            parse_args(strings(&[
+                "resolve",
+                "links.txt",
+                "--api-key",
+                "a",
+                "--api-key-file",
+                "keys.txt",
+            ]))
+            .is_err()
+        );
+        assert!(parse_args(strings(&["resolve"])).is_err());
+        assert!(parse_args(strings(&["resolve", "a.txt", "b.txt", "c.txt"])).is_err());
+        assert!(parse_args(strings(&["resolve", "links.txt", "--max-attempts", "0"])).is_err());
     }
 
     #[test]
