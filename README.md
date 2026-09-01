@@ -1,64 +1,43 @@
 # music-organiser
 
-`music-organiser` is a Rust CLI that downloads Spotify and YouTube Music links
-through spotDL, cleans and embeds synced lyrics, standardises ID3 tags, and
-provides recursive tag maintenance and CSV export tools.
+A Rust CLI that downloads Spotify and YouTube Music links through spotDL,
+cleans and embeds synced lyrics, standardises ID3 tags, and maintains a music
+library on disk.
 
 | Command | Purpose |
 |---|---|
-| `download` | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
-| `delete` | Remove selected ID3 frames recursively |
-| `export` | Write every ID3 frame found recursively into one CSV file |
-| `copyright` | Look the `TCOP` copyright message up again for music already on disk, in the catalogue of your choice |
+| [`download`](docs/download.md) | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
+| [`resolve`](docs/resolve.md) | Pin Spotify links to their YouTube Music track through Odesli, so `download` does not have to search |
+| [`delete`](docs/delete.md) | Remove selected ID3 frames recursively |
+| [`export`](docs/export.md) | Write every ID3 frame found recursively into one CSV file |
+| [`copyright`](docs/copyright.md) | Look the `TCOP` copyright message up again for music already on disk |
 
-The Cargo package and executable are currently named `music-tag-transfer`.
-Downloaded audio comes from spotDL's configured providers, not from Spotify.
-Only download material you are permitted to keep.
-
-## Contents
-
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Global usage](#global-usage)
-- [Download music](#download-music)
-- [Pin Spotify links to YouTube Music](#pin-spotify-links-to-youtube-music)
-- [Delete ID3 tags](#delete-id3-tags)
-- [Export ID3 frames to CSV](#export-id3-frames-to-csv)
-- [Refresh the copyright message](#refresh-the-copyright-message)
-- [Exit status](#exit-status)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
+The Cargo package and executable are named `music-tag-transfer`. Downloaded
+audio comes from spotDL's configured providers, not from Spotify. Only
+download material you are permitted to keep.
 
 ## Requirements
 
-All commands require a stable Rust toolchain with Rust 2024 edition support.
-The individual workflows have these additional requirements:
+A stable Rust toolchain with Rust 2024 edition support, plus:
 
-| Workflow | Additional requirements |
+| For | You need |
 |---|---|
-| `download` | spotDL 4.5.0 or newer and FFmpeg |
-| Copyright | Nothing for iTunes or MusicBrainz; a personal access token for Discogs, an OAuth access token for Spotify |
-| Synced lyrics and language | Nothing extra; both are handled by this program |
-| Some YouTube downloads | Deno, installed system-wide or through `spotdl --download-deno` |
-| `delete` | Read/write access to the relevant music folder |
-| `copyright` | Read/write access to the music folder, and internet access to the chosen catalogue |
-| `export` | Read access to the music folder and write access to the CSV destination |
+| `download` | spotDL 4.5.0 or newer, and FFmpeg |
+| Some YouTube downloads | Deno, system-wide or via `spotdl --download-deno` |
+| `copyright` with Discogs or Spotify | An access token for that source |
+| Everything else | Nothing extra |
 
 Check the external programs before downloading:
 
 ```bash
 spotdl --version
 ffmpeg -version
-deno --version
 ```
 
-Deno is optional until spotDL reports that a particular YouTube download needs
-it.
+Deno is optional until spotDL reports that a particular download needs it;
+`download` then offers to install it, or does so with `--auto-download-deno`.
 
 ## Installation
-
-Clone and build an optimized binary:
 
 ```bash
 git clone https://github.com/Raina3266/music_organiser.git
@@ -66,1289 +45,179 @@ cd music_organiser
 cargo build --release
 ```
 
-The result is `target/release/music-tag-transfer` on Linux and macOS, or
-`target/release/music-tag-transfer.exe` on Windows.
-
-Run it directly:
-
-```bash
-./target/release/music-tag-transfer --help
-```
-
-Or install it into Cargo's binary directory:
-
-```bash
-cargo install --path .
-music-tag-transfer --version
-```
-
-During development, every example below can instead begin with
-`cargo run --`. For example:
-
-```bash
-cargo run -- download links.txt
-```
+The binary is `target/release/music-tag-transfer`. Install it onto your `PATH`
+with `cargo install --path .`, or run any example below with `cargo run --`
+instead.
 
 ## Quick start
 
-`download` reads one link per line, so the fastest path is to paste the links
-you want into a text file. Spotify links, YouTube Music links, and
-`YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` exact-source pairs — which may also be
-written `SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL` — can be mixed freely in the same
-file.
-
-1. Create `links.txt`:
-
-   ```text
-   # a Spotify link: spotDL searches YouTube for the audio
-   https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW
-
-   # a YouTube Music link: spotDL searches Spotify for the metadata
-   https://music.youtube.com/watch?v=9bZkp7q19f0
-
-   # a pair: neither side is searched
-   https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql
-
-   # an album or playlist link downloads every song on it
-   https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy
-   ```
-
-2. Download them:
-
-   ```bash
-   music-tag-transfer download links.txt --output ./music
-   ```
-
-Every line is downloaded as MP3 with synchronised lyrics. Empty and
-timestamp-only lyric lines are removed before the `.lrc` text is embedded in
-`USLT`; each ID3v2.3 tag is then limited to the 15 supported metadata types.
-
-No credentials are needed for token-free downloads. Copyright comes from
-iTunes with a MusicBrainz fallback, and MusicBrainz also fills a missing ISRC;
-both catalogues are open without an account or API token.
-
-## Global usage
+Paste the links you want into a text file. Spotify links, YouTube Music links,
+and `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pairs can be mixed freely:
 
 ```text
-music-tag-transfer download [OPTIONS] <INPUT_FILE>
-music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
-music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
-music-tag-transfer copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
-music-tag-transfer resolve <INPUT_FILE> [OUTPUT_FILE] [--api-key KEY] [--country XX]
-```
-
-Global flags:
-
-| Flag | Meaning |
-|---|---|
-| `-h`, `--help`, `help` | Print the top-level help |
-| `-V`, `--version` | Print the package name and version |
-
-`download --help` prints command-specific help.
-
-Paths containing spaces must be quoted. The download command expands `~` in
-its input, output, and token-file paths. Other commands receive paths exactly
-as the shell supplies them.
-
-## Download music
-
-### Syntax
-
-```text
-music-tag-transfer download [OPTIONS] <INPUT_FILE>
-```
-
-### Input format
-
-`INPUT_FILE` must be UTF-8 text. Every non-empty line that does not begin with
-`#` is one of three forms, and a single file may mix them freely:
-
-```text
-# Blank lines and comments are ignored
-
-# 1. a Spotify link
+# a Spotify link: spotDL searches YouTube for the audio
 https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW
-https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy
-spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
 
-# 2. a YouTube Music link
+# a YouTube Music link: spotDL searches Spotify for the metadata
 https://music.youtube.com/watch?v=9bZkp7q19f0
-https://youtu.be/dQw4w9WgXcQ
 
-# 3. an exact-source pair, in either order
+# a pair: neither side is searched
 https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql
-https://youtu.be/9bZkp7q19f0|spotify:track:02Q0SXOsk74oV4hesiL6JW
-https://open.spotify.com/track/03UrZgTINDqvnUMbbIMhql|https://music.youtube.com/watch?v=dQw4w9WgXcQ
+
+# an album or playlist link downloads every song on it
+https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy
 ```
 
-Each form leaves a different part of the job to spotDL's own search:
+```bash
+music-tag-transfer download links.txt --output ./music
+```
 
-| Form | Audio | Metadata |
-|---|---|---|
-| Spotify link | searched on YouTube by spotDL | pinned by the link |
-| YouTube link | pinned by the link | searched on Spotify by spotDL |
-| `YOUTUBE_MUSIC_URL\|SPOTIFY_TRACK_URL` | pinned by the YouTube URL | pinned by the Spotify URL |
+Every line is downloaded as MP3 with synchronised lyrics, and each ID3v2.3 tag
+is limited to the 15 supported metadata types. No credentials are needed:
+copyright comes from iTunes with a MusicBrainz fallback, and both are open
+without an account.
 
-The pair is spotDL's exact-source syntax, and it is the only form in which
-nothing at all is left to a search. The two halves may be written in either
-order — `SPOTIFY_TRACK_URL\|YOUTUBE_MUSIC_URL` is accepted too, and is
-rewritten into the order spotDL expects.
+## Usage
 
-Pairs can be written by hand, or generated from a file of Spotify links with
-[`resolve`](#pin-spotify-links-to-youtube-music).
+```text
+music-tag-transfer download  [OPTIONS] <INPUT_FILE>
+music-tag-transfer resolve   <INPUT_FILE> [OUTPUT_FILE] [--api-key KEY] [--country XX]
+music-tag-transfer delete    <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
+music-tag-transfer export    <FOLDER> [OUTPUT_CSV] [--overwrite]
+music-tag-transfer copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
+```
 
-**Spotify links** may be `open.spotify.com` URLs or `spotify:` URIs, and may
-name a **track**, an **album**, or a **playlist**; an album or playlist link
-downloads every song on it. `intl-XX` and `embed` path prefixes are removed and
-HTTP links are normalized to HTTPS. Artist, episode, show, and `spotify.link`
-URLs are rejected — the last because a shortened link is never resolved.
+`-h`/`--help` prints the top-level help and `-V`/`--version` the version;
+`download --help` prints command-specific help. Paths containing spaces must
+be quoted. `download` expands `~` in its input, output, and token-file paths;
+other commands receive paths exactly as the shell supplies them.
 
-**YouTube links** may be `music.youtube.com`, `www.youtube.com`, `youtube.com`,
-`m.youtube.com`, or `youtu.be`. `/watch?v=ID` and `/playlist?list=ID` paths are
-supported; short `youtu.be/ID` links are expanded to
-`https://www.youtube.com/watch?v=ID`.
+### download
 
-The Spotify half of a **pair** must be a track, because a pair describes
-exactly one track, and the two halves must name different services: two
-Spotify URLs or two YouTube URLs are rejected.
-
-Query strings and fragments are removed, so tracking parameters such as `si=`
-do not create duplicates. Duplicate normalized lines are downloaded only once;
-a pair and a bare Spotify track link are different downloads even when they
-name the same track, because they resolve the audio differently; the same pair
-written in both orders is one download. If any
-non-comment line is invalid, the command reports up to ten invalid lines and
-stops before starting spotDL.
-
-### Options
+Reads one link per line and downloads each through spotDL, then rewrites the
+tag. See [docs/download.md](docs/download.md) for the input format, the
+metadata whitelist, lyric handling, and the Spotify token modes.
 
 | Option | Meaning |
 |---|---|
 | `-o, --output <DIR>` | Download directory; default `~/Documents/Music` |
 | `--spotdl <PROGRAM>` | spotDL executable or path; default `spotdl` |
-| `--token-free` | Explicitly download without a Spotify token and skip the startup question |
-| `--official-api` | Explicitly use Spotify's official Web API |
-| `--auth-token <TOKEN>` | Use this short-lived token and automatically select official mode |
-| `--token-file <FILE>` | Read a token from a file and automatically select official mode |
+| `--token-free` | Download without a Spotify token, skipping the startup question |
+| `--official-api` | Use Spotify's official Web API |
+| `--auth-token <TOKEN>` | Use this short-lived token, selecting official mode |
+| `--token-file <FILE>` | Read a token from a file, selecting official mode |
 | `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-copyright` | Skip both iTunes and MusicBrainz copyright lookups |
-| `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
-| `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
+| `--no-copyright` | Skip the iTunes and MusicBrainz copyright lookups |
+| `--language <LANGUAGE>` | Fallback language for `TLAN`; default `English` |
+| `--max-attempts <N>` | Network attempts per line; default `3` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
-| `-h, --help` | Print download help |
-| `-V, --version` | Print the application version |
 
-`--output=...`, `--spotdl=...`, `--auth-token=...`, `--token-file=...`, and
-`--language=...` are also accepted. Use `--` before an input filename
-that starts with a hyphen.
+`SPOTDL_PROGRAM` chooses a spotDL executable without repeating `--spotdl`.
 
-Set `SPOTDL_PROGRAM=/full/path/to/spotdl` to choose a spotDL executable
-without repeating `--spotdl`. An explicit `--spotdl` option takes
-precedence.
+### resolve
 
-### The spotDL command
-
-Each line is passed to spotDL on its own, as a single quoted argument, so a
-failure can be attributed to the input line it came from:
+Rewrites bare Spotify tracks as exact-source pairs by asking Odesli which
+YouTube Music track each one is, so spotDL downloads that recording instead of
+searching for it. Input and output are both `download` input files:
 
 ```bash
-spotdl download "LINE" \
-    --overwrite force --format mp3 --lyrics synced --generate-lrc
-```
-
-Those four options are fixed and are not configurable:
-
-| Option | Effect |
-|---|---|
-| `--overwrite force` | Every listed line is downloaded again, replacing any existing file |
-| `--format mp3` | Output is always MP3, so an ID3 tag can always be written |
-| `--lyrics synced` | spotDL prefers a provider that has time-synced lyrics |
-| `--generate-lrc` | spotDL writes the timed lyrics next to the audio as `.lrc` |
-
-The command also passes `--print-errors`, `--max-retries 0` (retries are
-handled here instead), and spotDL's output template:
-
-```text
-{album-artist} || {album}/{artists} - {title} [{track-id}].{output-ext}
-```
-
-Because `--overwrite force` is used, rerunning an input file re-downloads
-every line in it rather than skipping finished files.
-
-### One folder per album
-
-The leading `{album-artist} || {album}` in that template groups every song into
-a folder named after its album, so tracks that share an album land together:
-
-```text
-music/
-├── Daft Punk || Discovery/
-│   ├── Daft Punk - One More Time [0DiWol3AO6WpXZgp0goxAV].mp3
-│   └── Daft Punk - Aerodynamic [2VEZx7NWsZ1D0eJ4uv5Fym].mp3
-├── Daft Punk || Random Access Memories/
-│   └── Daft Punk - Get Lucky [69kOkLUCkxIZYexIgSG8rq].mp3
-├── output.txt
-└── music-tag-transfer-download-failures.txt
-```
-
-spotDL creates the folders and sanitizes both values for the filesystem, so no
-files are moved after the fact. `output.txt` and the failure report stay in the
-output directory itself, and a `.lrc` file that had to be kept stays beside its
-audio file inside the album folder.
-
-Two caveats:
-
-- Windows does not allow `|` in a path, so spotDL sanitizes the separator away
-  there; the folder is still one per album, but it will not read `||`.
-- Existing downloads are not moved. Rerunning the same input file re-downloads
-  them into the new layout, because `--overwrite force` is used.
-
-### The 15-frame metadata whitelist
-
-After each download, every frame outside this list is deleted. This catches
-extra metadata written by both spotDL and FFmpeg.
-
-| Tag | ID3 frame |
-|---|---|
-| Title | `TIT2` |
-| Artist | `TPE1` |
-| Album | `TALB` |
-| Comment | `COMM` |
-| Date | `TDRC` |
-| Track Number | `TRCK` |
-| Genre | `TCON` |
-| Album Artist | `TPE2` |
-| Copyright | `TCOP` |
-| Disc Number | `TPOS` |
-| ISRC | `TSRC` |
-| Language | `TLAN` |
-| Lyrics | `USLT` |
-| Picture: Cover (front) | `APIC` with type `CoverFront` |
-| WWW Audio Source | `WOAS` |
-
-Other `APIC` picture types, such as back covers and artist images, are also
-deleted. A tag on this list is kept when the source provides it. When a
-token-free download has no `TSRC`, MusicBrainz is searched by recording title
-and artist and its ISRC is written when found. `TCOP` and `TLAN` are also
-filled by this program, and the cleaned synced lyrics are written to `USLT`.
-
-#### Copyright
-
-Copyright is requested from the [iTunes Search
-API](https://performance-partners.apple.com/search-api) first. When iTunes has
-no confident match or fails, MusicBrainz is tried next and constructs a line
-from the release's phonographic-copyright or copyright label relationship.
-Neither source needs an account, key, or token.
-
-Lookups are by album rather than by track, because the copyright belongs to the
-album and because the downloads are already grouped that way. The album artist
-and album name in the tag spotDL just wrote are the search terms, and results
-are cached, so an album's worth of tracks costs one request.
-
-A copyright is stored only when a result matches **both** the album artist and
-the album name, because a wrong copyright is worse than none. The comparison
-ignores case and punctuation and allows one name to extend the other, so
-`Random Access Memories` still matches a listing called `Random Access Memories
-(Deluxe Edition)`. Anything less similar is treated as a different release and
-the frame is left alone.
-
-If both lookups fail outright — API throttling or no network — that is reported
-as a warning and **the rest of the tag is still written**. The rating still
-goes, the lyrics are still embedded, and only `TCOP` is left untouched.
-`--no-copyright` skips both sources altogether.
-
-Two things to know about the API: it is throttled per IP, so requests are
-spaced out and a throttled response is retried a few times before giving up;
-and it is queried against the US storefront, whose catalogue is the most
-complete. The `℗` line is the label's and rarely differs between storefronts.
-
-#### Language
-
-`TLAN` is looked up on MusicBrainz, per track, and falls back to reading the
-lyrics when MusicBrainz has no answer.
-
-The language comes from the **work** — the song as written — reached through
-the recording, rather than from the release. That distinction matters: a
-release's own language field describes the text on its track list, so an
-English song on a Korean album would be labelled Korean. The work is where
-MusicBrainz records what the song is actually sung in.
-
-The recording is found by ISRC where the tag has one, which is exact, and by
-artist and title otherwise, ranked the same way releases are so that a search
-for a common title cannot return somebody else's song of that name.
-
-Work data is patchy — plenty of recordings have no work linked, and plenty of
-works have no language recorded — so a miss is ordinary and costs nothing: the
-synced lyrics are then detected from as before, with the timestamps and any
-`[ar:...]` metadata stripped first so they cannot mislead the detector. A
-catalogue that names the language is preferred over the detector, since it
-describes the song rather than guessing at whatever text the `.lrc` happens to
-hold.
-
-This costs two MusicBrainz requests per track, spaced at the published one per
-second, and returns the recording's ISRC in the same lookup. Against the time
-spent fetching and transcoding the audio that is not the bottleneck.
-`--no-language-lookup` skips the work-language part but still looks up a
-missing ISRC and any copyright fallback. Set `MUSICBRAINZ_CONTACT` so
-MusicBrainz can reach you.
-
-`TLAN` is written as a readable **name** — `English`, `Chinese`, `Korean`,
-`Spanish` — because that is what a tagger displays. ID3v2.3 specifies an
-ISO-639-2 code in this frame, so a strict reader will see a value it does not
-recognise; the three-byte language field inside the `USLT` frame, whose width
-the frame format fixes, still carries the code.
-
-- A language from MusicBrainz sets `TLAN`, and the lyrics frame's own language
-  field is set to the matching code.
-- Failing that, a confident detection from the lyrics does the same.
-- Too little text, or an unreliable guess, falls back to `--language`
-  (default `English`) rather than recording something invented. Two or more
-  non-blank lyric lines are required before a guess is even attempted.
-- A track with no `.lrc` file has nothing to detect from, so it gets
-  `--language` too.
-
-`--language` takes either form, so `--language Korean`, `--language korean`,
-and `--language kor` are the same request. An unrecognised value is refused
-before anything is downloaded.
-
-The detector reports ISO-639-3, which for every individual language it knows is
-the same as the ISO-639-2/T code ID3v2.3 asks for; the two macrolanguage cases
-are mapped to their collective code and name (`cmn` becomes `zho` and
-`Chinese`, `pes` becomes `fas` and `Persian`).
-
-### Synced lyrics in the ordinary `USLT` frame
-
-Every download asks spotDL for time-synced lyrics and for the `.lrc` file that
-carries them — `--lyrics synced --generate-lrc`, on every line of the input
-file, with no way to turn it off.
-
-After each successful download that `.lrc` file is pasted into the tag during
-the same metadata rewrite that applies the whitelist:
-
-1. The `.lrc` file sitting beside the audio is read.
-2. Empty lines and lines containing only timestamps, such as `[00:00:00]` or
-   `[00:12.50][00:42.50]`, are removed.
-3. The cleaned text is written to the ID3v2.3 `USLT` lyrics frame. Timestamps
-   attached to real lyric lines remain intact, and any previous `USLT` is
-   replaced.
-4. Every `SYLT` synchronised-lyrics frame is removed, including spotDL's.
-5. The file is read back from disk. Only if the stored `USLT` frame matches the
-   cleaned text, and no `SYLT` frame survives, is the `.lrc` file deleted.
-
-`USLT` is the frame players actually read; `SYLT` is the one most of them
-ignore. Players that do understand timed lyrics parse the timestamps out of the
-`USLT` text, so retaining the timestamps attached to lyric lines makes the
-lyrics show up in both kinds of player.
-
-Only the language detector sees the lyrics without their timestamps — the
-`[mm:ss.xx]` prefixes and any `[ar:...]` metadata header would only mislead it.
-
-If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
-never the thing that gets lost, nothing is written to the audio file, and the
-line it belongs to is reported as failed so it appears in the retry list. An
-`.lrc` file with no content left after cleaning counts as a failure; an untimed
-one is pasted like any other. A line for which spotDL generated no `.lrc` file
-is not a failure either: the metadata whitelist is still applied, and there
-were simply no synced lyrics to paste.
-
-### How downloaded files are found again
-
-Before each line runs, the output directory's music files are recorded; when
-spotDL finishes, whatever is new or was rewritten is what that line produced.
-That works for every form, including the lines that name no single Spotify
-track, so an album or playlist line gets all of its songs tagged. For a line
-that does name a single track, the Spotify track ID in the forced
-`[{track-id}]` output template is kept as a fallback.
-
-### The track ID is removed from the file name
-
-spotDL is asked for the `[{track-id}]` suffix only so that a file can be tied
-back to the line that asked for it. That job is done once the tag has been
-rewritten, so each file is then renamed without it:
-
-```text
-i-dle - Luv U [2Mvdcda3pVMDASD7oZWPr4].mp3   →   i-dle - Luv U.mp3
-```
-
-Only a trailing bracketed run of 16 to 32 letters and digits is removed, so a
-bracket that belongs to the title survives: `Artist - Song [Live]
-[2Mvdcda3pVMDASD7oZWPr4].mp3` becomes `Artist - Song [Live].mp3`. A `.lrc`
-file still sitting next to the audio — which happens only when the metadata
-step could not finish — is renamed with it.
-
-Because `--overwrite force` means a rerun downloads every line again, a file
-already using the trimmed name is an earlier download of the same track in the
-same album folder, and it is replaced. The run prints a line naming any file
-replaced this way, and the closing summary counts them:
-
-```text
-Names: dropped the track ID from 12 file name(s); 1 replaced an earlier download.
-```
-
-A rename that fails is reported and nothing else is affected: the audio and its
-tag are already finished, so only the name is left untidy.
-
-### Download execution and output files
-
-The output directory receives:
-
-| File | Contents |
-|---|---|
-| `output.txt` | Failed and unattempted lines, ready to retry |
-| `music-tag-transfer-download-failures.txt` | Detailed attempted failures and the stop reason |
-
-`output.txt` is always written; it is empty after a completely successful
-run. Because it holds the same line syntax as the input, it can be passed
-straight back to `download`. The detailed failure report is written only when
-at least one attempted line fails or causes the batch to stop.
-
-Ordinary network/service failures use exponential backoff up to
-`--max-attempts`. A short Spotify `Retry-After` delay is respected once.
-Application quota errors, repeated rate limits, or delays above
-`--max-rate-limit-wait` stop the batch and preserve the current and remaining
-lines rather than rotating tokens or sleeping for a long time.
-
-If spotDL reports that Deno is required:
-
-- an interactive run asks before invoking `spotdl --download-deno`;
-- `--auto-download-deno` approves that setup automatically;
-- `--non-interactive` without automatic setup stops and preserves the lines.
-
-### Optional Spotify token
-
-An interactive run now makes the choice explicit:
-
-```text
-Choose how this download should access Spotify metadata:
-  1) Without a Spotify token (token-free)
-  2) With a Spotify token (official Web API)
-Select 1 or 2 [1]:
-```
-
-Press Enter or choose `1` for token-free mode. Choose `2` to paste a token.
-For a script, use `--token-free` to select the first mode without a prompt, or
-provide exactly one of these to select official mode:
-
-```bash
-music-tag-transfer download links.txt --auth-token 'short-lived-access-token'
-music-tag-transfer download links.txt --token-file ./spotify-token.txt
-SPOTIFY_AUTH_TOKEN='short-lived-access-token' music-tag-transfer download links.txt
-```
-
-Any of these automatically enables `--use-official-api`; `--official-api` does
-not have to be supplied separately. The token may be a bare value, `Bearer
-...`, or a quoted `const token = '...'` assignment.
-
-Which token you can use depends on where it came from. A token issued to a
-developer-mode Spotify app requires the **app owner to hold an active Premium
-subscription** — since Spotify's February 2026 developer changes, such an app
-owned by a free account answers every request with `403 Active premium
-subscription required for the owner of the app`, which stops the batch. A token
-copied from the `open.spotify.com` web player carries no such requirement, but
-expires within the hour; when it does, an interactive run asks for a
-replacement.
-
-### Token-free and official API modes
-
-The interactive default and non-interactive fallback are token-free. It
-deliberately does not pass
-`--use-official-api`, `--auth-token`, or `--use-cache-file` to spotDL.
-Before downloading, it checks spotDL's active `config.json` and stops if
-`use_official_api`, `use_cache_file`, `user_auth`, or a saved
-`auth_token` would silently change that behavior. Disable config loading or
-clear those settings before retrying.
-
-Use the official API only as an explicit fallback. Supplying a token selects
-it automatically:
-
-```bash
-SPOTIFY_AUTH_TOKEN='short-lived-access-token' \
-  music-tag-transfer download links.txt
-```
-
-Official-mode token precedence is:
-
-1. `--auth-token`;
-2. `--token-file`;
-3. `SPOTIFY_AUTH_TOKEN`.
-
-`--auth-token` and `--token-file` are mutually exclusive. Token files may
-contain a plain token, a `Bearer ...` value, or a quoted JavaScript-style token
-assignment. Protect these files and never commit tokens, cookies, Client
-Secrets, or other credentials.
-
-When an official token expires, an interactive terminal can request a
-replacement. `--non-interactive` disables this prompt.
-
-## Pin Spotify links to YouTube Music
-
-`download` hands a bare Spotify link to spotDL, which searches YouTube Music
-for the title and artist and scores what comes back. That is a good guess, and
-an exact-source pair exists to replace a guess — so a pair is only worth
-writing down when it came from somewhere that did not guess.
-
-[Odesli](https://odesli.co) (the service behind `song.link`) is that somewhere.
-It cross-references the streaming catalogues by their own identifiers rather
-than by matching text, so it disagrees with a search precisely where a search
-goes wrong. The `resolve` command asks it which YouTube Music track each
-Spotify track is, and rewrites those lines as pairs.
-
-### Syntax
-
-```text
-music-tag-transfer resolve <INPUT_FILE> [OUTPUT_FILE] [OPTIONS]
-```
-
-```bash
-# writes links-resolved.txt beside links.txt
-music-tag-transfer resolve links.txt
-
-# then download the pinned file
+music-tag-transfer resolve links.txt          # writes links-resolved.txt
 music-tag-transfer download links-resolved.txt --output ./music
 ```
 
-The input is an ordinary `download` input file and so is the output, so the two
-commands compose. Only bare Spotify **track** lines are looked up. Everything
-else is copied through untouched:
-
-| Input line | What `resolve` does |
-|---|---|
-| Spotify track | Asks Odesli, and writes a pair when it answers |
-| Spotify album or playlist | Copied through — an album is not one track |
-| YouTube Music link | Copied through — the audio is already pinned |
-| An existing pair | Copied through — there is nothing left to resolve |
-
-A track Odesli cannot place stays a bare Spotify link on purpose. Dropping it
-would lose a song spotDL can very likely still find by searching; leaving it
-alone costs nothing and keeps the file complete. That means a resolved file is
-always a drop-in replacement for the file it came from, never a subset of it.
-
-Only Odesli's `youtubeMusic` link is used. It often also knows a plain
-`youtube` link for the same track, but that is as likely to be the music video —
-wrong length, spoken intro, live take — and pinning the audio to the wrong
-recording is worse than letting spotDL search for the right one.
-
-### Options
-
 | Option | Meaning |
 |---|---|
-| `OUTPUT_FILE` | Where to write. Defaults to the input name with `-resolved` before the extension |
+| `OUTPUT_FILE` | Where to write; defaults to the input name with `-resolved` added |
 | `--overwrite` | Allow the output file to be replaced |
-| `--api-key KEY` | An Odesli API key. Readable by every process on the machine |
+| `--api-key KEY` | An Odesli API key; also read from `ODESLI_API_KEY` |
 | `--api-key-file FILE` | Read the key from a file instead |
-| `--country XX` | Storefront to ask about, as a two-letter code. Defaults to `US` |
-| `--max-attempts N` | How many times to try one request before giving up on it |
-| `--max-wait SECONDS` | Longest rate-limit wait to sit through before giving up |
-| `--max-throttle-retries N` | How many times to wait out throttling for one track |
+| `--country XX` | Storefront to ask about, as a two-letter code; default `US` |
+| `--max-attempts N` | Attempts per request before giving up on it |
+| `--max-wait SECONDS` | Longest rate-limit wait to sit through |
+| `--max-throttle-retries N` | Times to wait out throttling for one track |
 
-The key may also arrive in `ODESLI_API_KEY`. A file and the environment are
-both preferred to `--api-key`, which every other process on the machine can
-read out of the process list.
+Albums, playlists, YouTube links, existing pairs, and tracks Odesli cannot
+place are all copied through untouched, so the output is always a drop-in
+replacement for the input. Without a key Odesli allows ten requests a minute,
+so a hundred tracks takes ten minutes. See [docs/resolve.md](docs/resolve.md).
 
-### Rate limits and how long a run takes
+### delete
 
-Odesli allows ten requests a minute without a key, so `resolve` spaces its
-requests six seconds apart and says up front how long the file will take. A
-hundred tracks is ten minutes. With a key it starts at two requests a second
-and lets the throttling correct it: a `429` widens the spacing, and it eases
-back once requests are getting through again.
-
-Each distinct track is asked about once however often the file repeats it, and
-a run can be repeated cheaply — re-resolving an already-resolved file only asks
-about the lines that stayed bare.
-
-### Exit status
-
-`0` when every track got a real answer, whether or not that answer was a link.
-`1` when a lookup failed outright, or Odesli stopped answering partway through.
-Either way the output file is written in full, so a failed run can simply be
-run again.
-
-## Delete ID3 tags
-
-The delete command changes metadata in place. Back up valuable files and run a
-dry run first.
-
-### Syntax
-
-```text
-music-tag-transfer delete <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
-```
-
-The brackets are part of the argument, and the entire list should be quoted:
+Removes the named ID3 frames from every music file under a folder. The
+brackets are part of the argument, and the whole list should be quoted:
 
 ```bash
 music-tag-transfer delete "/path/to/music" "[Encoded-by, Album Artist]" --dry-run
-music-tag-transfer delete "/path/to/music" "[Encoded-by, Album Artist]"
 ```
 
-Tag names are case-sensitive. Whitespace around comma-separated names is
-ignored, and duplicate frame IDs are removed from the request.
+Tag names are case-sensitive. `--dry-run` reports the same counts without
+writing. See [docs/delete.md](docs/delete.md) for the supported names.
 
-The command:
+### export
 
-- searches the folder and its subdirectories;
-- processes MP1, MP2, MP3, WAV, AIF, and AIFF extensions case-insensitively;
-- ignores symlinks and non-music files;
-- skips files without an ID3 tag;
-- skips tagged files that contain none of the requested frames;
-- removes every frame with a requested ID;
-- writes changed tags as ID3v2.3;
-- reports per-file errors and continues with other files.
-
-Without `--dry-run`, each changed file is copied to a temporary file in the
-same directory, updated there, and then replaced. `--dry-run` performs the
-same scan and reports the expected counts without writing files.
-
-### Supported delete tag names
-
-| Tag name | ID3v2.3 frame |
-|---|---|
-| `Encoded-by` | `TENC` |
-| `Album Artist` | `TPE2` |
-| `Album` | `TALB` |
-| `Artist` | `TPE1` |
-| `BPM` | `TBPM` |
-| `Comment` | `COMM` |
-| `Composer` | `TCOM` |
-| `Conductor` | `TPE3` |
-| `Copyright` | `TCOP` |
-| `Date` | `TDAT` |
-| `Disc Number` | `TPOS` |
-| `Encoding Settings` | `TSSE` |
-| `File Owner` | `TOWN` |
-| `File Type` | `TFLT` |
-| `Genre` | `TCON` |
-| `Grouping` | `TIT1` |
-| `Initial Key` | `TKEY` |
-| `ISRC` | `TSRC` |
-| `Language` | `TLAN` |
-| `Length` | `TLEN` |
-| `Lyrics` | `USLT` |
-| `Synced Lyrics` | `SYLT` |
-| `Lyricist` | `TEXT` |
-| `Media Type` | `TMED` |
-| `Original Album` | `TOAL` |
-| `Original Artist` | `TOPE` |
-| `Original Filename` | `TOFN` |
-| `Original Lyricist` | `TOLY` |
-| `Original Release Year` | `TORY` |
-| `Picture` | `APIC` |
-| `Playlist Delay` | `TDLY` |
-| `Publisher` | `TPUB` |
-| `Recording Dates` | `TRDA` |
-| `Remixed By` | `TPE4` |
-| `Subtitle` | `TIT3` |
-| `Time` | `TIME` |
-| `Title` | `TIT2` |
-| `Track Number` | `TRCK` |
-| `User Text` | `TXXX` |
-| `User URL` | `WXXX` |
-| `Year` | `TYER` |
-
-## Export ID3 frames to CSV
-
-The export command only reads music files. It walks a folder recursively and
-writes every ID3 frame it finds into a single CSV file, which is the quickest
-way to see what a library actually contains before deleting or rewriting
-anything.
-
-### Syntax
-
-```text
-music-tag-transfer export <FOLDER> [OUTPUT_CSV] [--overwrite]
-music-tag-transfer copyright <FOLDER> [--only-missing] [--dry-run]
-```
+Writes every ID3 frame under a folder into one CSV:
 
 ```bash
-# writes /path/to/music/id3-frames.csv
-music-tag-transfer export "/path/to/music"
-
-# writes a named file, replacing it if it is already there
+music-tag-transfer export "/path/to/music"              # id3-frames.csv in that folder
 music-tag-transfer export "/path/to/music" ~/frames.csv --overwrite
 ```
 
-Without `OUTPUT_CSV` the file is named `id3-frames.csv` and is created inside
-the scanned folder. An existing destination is never replaced unless
-`--overwrite` is passed; the command reports the conflict and writes nothing.
+An existing destination is never replaced without `--overwrite`. See
+[docs/export.md](docs/export.md) for the column layout.
 
-### CSV layout
+### copyright
 
-- The first column, `File`, holds each file's path relative to the scanned
-  folder.
-- Every other column is one ID3 frame ID found anywhere under the folder,
-  sorted by frame ID. Frames this program knows a name for are headed
-  `Title (TIT2)`; anything else is headed with its bare frame ID.
-- Every music file gets one row, including files without an ID3 tag, whose
-  cells are all empty.
-- A frame a file does not have stays an empty cell, and a frame that is
-  present but empty stays empty too.
-- Repeated frames sharing a frame ID, such as several `TXXX` or `APIC` frames,
-  are joined with ` | ` in one cell.
-
-The file is UTF-8 with `CRLF` record separators and RFC 4180 quoting, so
-values containing commas, quotation marks, or newlines survive a round trip
-through spreadsheet software.
-
-Frame values are exported as text:
-
-| Frame | Cell contents |
-|---|---|
-| Text and URL frames | The value itself |
-| `TXXX`, `WXXX`, `COMM`, `USLT` | `description: value`, or just the value when the description is empty |
-| `SYLT` | The timed lines rebuilt in `.lrc` form, `[mm:ss.xx] text`, one per line |
-| `APIC` | `Front cover (image/jpeg, 40213 bytes)`, prefixed by the description when there is one |
-| `PRIV` | `owner identifier: 32 bytes` |
-| Other binary frames | A short summary rather than the raw bytes |
-
-The scan matches the delete command: the same MP1, MP2, MP3, WAV, AIF, and
-AIFF extensions, case-insensitively, with symlinks and non-music files
-ignored. Files that cannot be read are reported on stderr, left out of the
-CSV, and make the command exit with status 1; the rest of the library is still
-exported.
-
-## Refresh the copyright message
-
-The `download` command fills `TCOP` from the iTunes Search API as each file
-arrives. This command does the same for music that is already on disk, which
-is the way to fix a library downloaded before the lookup existed, or one whose
-lookups were skipped with `--no-copyright`.
-
-### Syntax
-
-```text
-music-tag-transfer copyright <FOLDER> [--source NAME] [--token-file PATH] [--only-missing] [--dry-run]
-```
+Looks the `TCOP` message up again for music already on disk — the way to fix a
+library downloaded before the lookup existed, or one downloaded with
+`--no-copyright`.
 
 ```bash
 music-tag-transfer copyright "/path/to/music" --dry-run
-music-tag-transfer copyright "/path/to/music"
 music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
 ```
 
-| Flag | Effect |
+| Option | Meaning |
 |---|---|
-| `--source NAME[,NAME...]` | Which catalogue to ask: `itunes`, `musicbrainz`, `discogs`, or `spotify`. Several names build a fallback chain, tried in order. Omit it and an interactive run asks |
-| `--max-wait SECONDS` | Longest rate-limit pause to sit through before giving up on a source. Default 60 |
-| `--token-file PATH` | Read the chosen source's token, or MusicBrainz's contact address, from a file |
-| `--token VALUE` | The same, given inline. Every process on the machine can read a command line, so prefer `--token-file` or the environment |
-| `--only-missing` | Leave files that already carry a copyright message alone, and never look their album up |
+| `--source NAME[,NAME...]` | `itunes`, `musicbrainz`, `discogs`, or `spotify`. Several names build a fallback chain. Omit it and an interactive run asks |
+| `--token-file PATH` | Read the source's token, or MusicBrainz's contact address, from a file |
+| `--token VALUE` | The same inline; prefer `--token-file` or the environment |
+| `--only-missing` | Leave files that already carry a copyright alone |
 | `--dry-run` | Report the same counts without writing any file |
 | `--csv PATH` | Write a before-and-after row for every file visited |
 | `--overwrite` | Let `--csv` replace an existing report |
-| `--max-attempts N` | How many times to try one request before giving up on that album (5 by default) |
-| `--max-throttle-retries N` | How many times to wait out throttling before skipping that album (30 by default) |
-| `--max-wait SECONDS` | Longest rate-limit pause to sit through before setting a source aside (60 by default) |
-
-### Choosing where the copyright comes from
-
-The four catalogues disagree, on wording and on coverage alike, so the source
-is a question the command asks rather than a setting buried in a config file.
-Run it without `--source` at a terminal and it offers the choice:
-
-```text
-Where should the copyright message come from?
-  1) iTunes       no account needed; the ℗ line as Apple's store publishes it
-  2) MusicBrainz  no account needed; built from the release's copyright and
-                  phonographic-copyright label relationships
-  3) Discogs      needs a personal access token; built from the release's
-                  Copyright (c) and Phonographic Copyright (p) credits
-  4) Spotify      needs an access token; the album's own copyright lines,
-                  taken as written
-
-Choose 1-4 or a name, Enter for iTunes:
-```
-
-Answer with the number or the name. `--source` answers it in advance, and a
-run with no terminal — a script, a cron job, a pipe — uses iTunes rather than
-stopping for an answer nobody is there to give.
-
-| Source | Account | Where the message comes from |
-|---|---|---|
-| `itunes` | None | The `copyright` field of the matching album in the iTunes Search API, as Apple publishes it |
-| `musicbrainz` | None | Assembled from the release's `phonographic copyright` label relationship, or its `copyright` one, plus the year that relationship began |
-| `discogs` | Personal access token | Assembled from the release's `Phonographic Copyright (p)` credit, or its `Copyright (c)` one, plus the release year |
-| `spotify` | OAuth access token | The album's own `copyrights` entry, `P` for preference and `C` otherwise, gaining the ℗ or © symbol only if Spotify left it off |
-
-Because two of the four assemble the line rather than quote it, the same album
-can come out worded differently depending on who was asked. Pick one source for
-a library and stay with it, or use `--only-missing` so an established message is
-never rewritten in another catalogue's style.
-
-### Surviving a rate limit
-
-Catalogues run out of patience, and a library is hundreds of albums. Spotify in
-particular measures its limit over a rolling window and answers a breach with a
-`Retry-After` of **hours**, not seconds.
-
-Two things follow from that, and both are handled:
-
-**A spent source is dropped, not retried.** A wait longer than `--max-wait`, a
-run of throttled responses, or a rejected token all mean the source has stopped
-answering — asking it again does not help and, with a rate limit, makes it
-worse. That source is retired for the rest of the run and named in the summary.
-
-**A fallback chain keeps the run alive.** Give `--source` several names and each
-album is offered to them in turn, so one catalogue running dry costs you that
-catalogue, not the run:
-
-```bash
-music-tag-transfer copyright "/path/to/music" --source spotify,musicbrainz,itunes
-```
-
-Spotify answers until its limit is spent, then MusicBrainz takes every
-remaining album, with iTunes behind it. The summary shows who supplied what:
-
-```text
-Looking copyrights up in Spotify, then MusicBrainz, then iTunes.
-Spotify is rate limited for another 5h 21m, far past the 60-second limit this run will wait.
-  Dropping Spotify for the rest of this run.
-  Spotify: 47 album(s), then stopped answering
-  MusicBrainz: 231 album(s)
-  iTunes: 12 album(s)
-```
-
-If every source is spent the scan **stops** rather than turning each remaining
-album into an identical failure. Files already written stay written, and
-`--only-missing` resumes from there:
-
-```bash
-music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
-```
-
-`--max-wait 900` will sit through a fifteen-minute pause if you would rather
-wait than switch source. It will not sit through five hours, and neither
-should you.
-
-### Tokens and contact addresses
-
-Discogs and Spotify will not answer without a token. Each is read from
-`--token`, then `--token-file`, then the environment, and only then by asking:
-
-| Source | Variable | Where to get one |
-|---|---|---|
-| `discogs` | `DISCOGS_TOKEN` | <https://www.discogs.com/settings/developers> → "Generate new token". A personal access token, not your password |
-| `spotify` | `SPOTIFY_ACCESS_TOKEN` | The same kind of token `download` asks for. One copied from the open.spotify.com web player works but expires within the hour |
-| `musicbrainz` | `MUSICBRAINZ_CONTACT` | Not a token: an email address or URL. MusicBrainz asks every application to identify itself so it can contact whoever runs one that misbehaves rather than blocking it |
-
-```bash
-export DISCOGS_TOKEN="..."
-music-tag-transfer copyright "/path/to/music" --source discogs
-```
-
-A run with no terminal and no token fails immediately, naming the variable to
-set, rather than scanning the whole library only to find it cannot ask anything.
-
-### Seeing what a run would do, before it does it
-
-`--dry-run` prints counts, which tells you how much would change but not
-*what*. Pair it with `--csv` and you get the detail, one row per file:
-
-```bash
-music-tag-transfer copyright "/path/to/music" --dry-run --csv changes.csv
-```
-
-| Column | What it holds |
-|---|---|
-| `File` | The path, relative to the folder scanned |
-| `Album Artist`, `Album` | What the lookup searched with |
-| `Copyright Before` | The message the file carries now |
-| `Copyright After` | What would be written, or empty when nothing was found |
-| `Outcome` | `written`, `unchanged`, `skipped`, `no match`, `lookup failed`, `no album in tag`, `no ID3 tag`, or `error` |
-| `Source` | Which catalogue supplied the message |
-| `Note` | Why, for the outcomes that have a reason |
-
-Every visited file gets a row, including the ones nothing happened to — a
-`no match` row still shows the message it kept, so the report is a complete
-account rather than a list of changes. `Copyright After` is left empty
-whenever nothing would be written, which is what makes a kept message
-obvious at a glance.
-
-The same flag works without `--dry-run`, where the file becomes a record of
-what was written rather than a preview. It refuses to replace an existing
-report unless `--overwrite` is given, the same rule `export` follows.
-
-With a fallback chain the `Source` column is worth reading on its own: it
-shows which catalogue actually answered for each album.
-
-### A file is only written when a copyright was found
-
-Nothing is ever cleared — an existing `TCOP` survives every kind of miss,
-including a rate limit that ends the run. A file is left exactly as it was
-when:
-
-- the chosen source has no confident match for its album;
-- the lookup fails, for instance with no network;
-- its tag names no album artist and album to search with;
-- it carries no ID3 tag at all;
-- the message found is the one it already has.
-
-Only a release that matches **both** the album artist and the album name in the
-tag is used, whichever source answered, so a wrong copyright is never written.
-
-The comparison has to absorb the ways catalogues disagree without ever merging
-two different records. It ignores case, punctuation, and accents, so a tag
-reading `Beyonce` finds Spotify's `Beyoncé`; it reads `&` as `and`, because
-one catalogue prints `Earth, Wind & Fire` and the next spells it out; and it
-ignores a leading `The`.
-
-An edition suffix is ignored **only when it says it is one** — bracketed, as in
-`(Deluxe Edition)`, `[Platinum Edition]`, or the `(2)` Discogs appends to a
-disambiguated artist; or spelled out of a small vocabulary of edition words, as
-in Spotify's `B'Day Deluxe Edition`. Anything else is a different record:
-`Vol. 1` and `Pt. 2` distinguish releases rather than editions, and a suffix
-naming a different recording — `(Live)`, `(Acoustic Version)`, `(Sped Up)`,
-`(Radio Edit)` — is never ignorable, because those carry their own copyright.
-
-Where several candidates match, the closest wins rather than the first listed,
-so a search for `Discovery` prefers the plain release over a deluxe edition
-that happened to come back ahead of it.
-
-### The rest of the tag is evidence too
-
-A name is a weak key on its own, so the lookup uses everything else the tag
-knows about the release:
-
-| Frame | What it settles | Used by |
-|---|---|---|
-| `TSRC` | The ISRC, a globally unique identifier for the **recording** | Spotify and MusicBrainz search by it directly |
-| `TRCK` | The album's track total, from the `12` in `5/12` | all four, to rank candidates |
-| `TDRC` | The release year | all four, to rank candidates |
-
-The ISRC is the strong one: where a source can search by it, the release is
-found by identity instead of by name, and a whole class of error — the wrong
-artist's album entirely — becomes impossible. It identifies a *recording*
-rather than a release, though, since the same recording sits on the album, the
-single and any number of compilations, so the album name still chooses between
-the releases it turns up. A malformed ISRC is ignored rather than searched
-with, and an ISRC that finds nothing falls back to the name.
-
-spotDL fills `TSRC` **only when it used the official Spotify API**, so a
-library downloaded token-free has none. Check yours with `export` and look at
-the `ISRC (TSRC)` column.
-
-The track count is the underrated one, and needs no account at all:
-`Discovery` has fourteen tracks and `Discovery (Deluxe Edition)` has twenty,
-which separates them far more reliably than any comparison of their names.
-
-This evidence **ranks** candidates; it does not veto them. Agreement beats
-missing evidence, which beats conflict, so a release whose year and track count
-both match wins — but the only candidate there is still supplies its copyright
-even when the year disagrees, because catalogues genuinely disagree about
-release dates. The one exception is Discogs, which opens candidates in the
-order its search returned them and so cannot reorder them; there a
-contradicting track count skips the release and moves to the next.
-
-None of it costs an extra request. The evidence is taken from the first file
-seen for an album and reused for the rest, so a lookup is still one search per
-album however many tracks it has.
-
-Misses and failures are printed as they happen and counted in the summary, and
-the summary names the other sources, since an album missing from one catalogue
-is often complete in another.
-
-### When a request fails
-
-A request can fail for two quite different reasons, and they are answered
-differently.
-
-**The server says slow down.** A `429`, or a `503` — which is how MusicBrainz
-signals a breached rate limit rather than the `429` you might expect — is
-waited out, honouring `Retry-After`, and retried `--max-throttle-retries`
-times (**30** by default). Running out of those skips that album and the scan
-carries on: throttling passes, and the album after this one will very likely
-go through, so one album's bad luck is never a reason to stop.
-
-Waiting out the one refused request is not enough on its own, though. The next
-request would go out at the same rate and be refused the same way, which is how
-one throttled album turns into a screenful of them:
-
-```text
-MusicBrainz lookup failed (HTTP 503 Service Unavailable)
-MusicBrainz lookup failed (HTTP 503 Service Unavailable)
-MusicBrainz lookup failed (HTTP 503 Service Unavailable)
-```
-
-So the **pacing itself widens**. Every refusal doubles the gap the run leaves
-between requests, up to ten seconds, and ten requests getting through cleanly
-halve it again, down to the rate the catalogue publishes. A published limit is
-an average rather than a promise — MusicBrainz allows roughly one request a
-second, but a busy hour, or somebody else sharing your address, can see it
-refuse a rate it accepted earlier in the same run — and this finds the rate
-that is actually being accepted instead of insisting on the documented one:
-
-```text
-MusicBrainz is refusing requests at this rate; spacing them 2.2s apart from here on.
-MusicBrainz is answering again; easing the spacing back to 1.1s.
-```
-
-The exception is a `Retry-After` measured in hours. No number of retries
-shortens that, so the source is **set aside** — stopped being asked — while
-the run itself continues to the end.
-
-**Something went wrong in transit.** A timeout, a dropped connection, a `500`
-or a `502` says nothing about the album, so the request is simply tried again
-after a growing pause — 2s, 4s, 8s, up to 30s — `--max-attempts` times. After
-that the album is given up on and the scan moves to the next one; nothing is
-written and the file keeps whatever it had.
-
-Both are visible while the run works:
-
-```text
-iTunes attempt 1 failed (operation timed out); retrying in 2s...
-iTunes attempt 2 failed (operation timed out); retrying in 4s...
-Daft Punk - Discovery: the lookup failed (iTunes request failed after 3 attempts: ...); left unchanged.
-```
-
-One album failing says nothing about the next. **Three in a row** — whether
-they could not reach the catalogue at all or never got through its throttling
-— says the network is down or the catalogue is refusing everyone, so the
-source is set aside at that point — otherwise a whole library would grind through five
-attempts each to discover the same thing hours later. A single success clears
-the count, so an occasional blip never accumulates into a false verdict.
-
-### The scan always finishes
-
-Setting a source aside stops it being *asked*; it never stops the run. Every
-file under the folder is still visited and still gets a row in `--csv`,
-including the ones nobody could answer for — so the report is a complete
-account of the library rather than however far the scan got before something
-went wrong. With a fallback chain the remaining catalogues simply take over.
-
-A reason is printed once, not once per album. A source that has stopped
-answering would otherwise repeat itself for every remaining album in the
-library, which buries the part of the output worth reading.
-
-Nothing is lost either way: a file nobody could answer for is left exactly as
-it was, so `--only-missing` picks it up on a later run.
-
-All of this lives in one place and applies to every request each source makes,
-searches and detail fetches alike.
-
-### One request per album
-
-The album artist and album name in each tag are the search key, and the answer
-is remembered for the rest of the run, so a 12-track album costs one request
-rather than twelve. Throttling responses are retried with a backoff that honours
-`Retry-After`, and requests are spaced to stay inside each catalogue's published
-limit:
-
-| Source | Spacing | Requests per album |
-|---|---|---|
-| `itunes` | 200 ms | One |
-| `spotify` | 500 ms — deliberately slower than the API demands, because two requests per album at 200 ms earned a five-hour ban on a real library | Two: the search answers with a simplified album that carries no copyrights, so the match is fetched in full |
-| `musicbrainz` | 1.1 s, its published one-per-second limit | Up to four: the search, then up to three matching releases, since only some pressings carry the relationships |
-| `discogs` | 1.1 s, within its 60-per-minute limit | Up to four: a search result carries neither the credits nor a reliably split artist and title, so candidates have to be opened to be judged |
-
-A library of 500 albums therefore takes roughly two minutes on iTunes, about
-ten on Spotify, and up to half an hour on MusicBrainz or Discogs. For bulk
-work prefer MusicBrainz or iTunes and keep Spotify for filling gaps with
-`--only-missing`.
-
-Every changed file is written as ID3v2.3 through the same copy-edit-rename that
-the other commands use.
-
-### Seeing what changed
-
-`export` pairs well with this: dump the library, look at the
-`Copyright (TCOP)` column, run the refresh, and dump it again.
-
-```bash
-music-tag-transfer export "/path/to/music" before.csv
-music-tag-transfer copyright "/path/to/music"
-music-tag-transfer export "/path/to/music" after.csv
-```
+| `--max-attempts N` | Attempts per request before giving up on that album; default 5 |
+| `--max-throttle-retries N` | Times to wait out throttling before skipping an album; default 30 |
+| `--max-wait SECONDS` | Longest rate-limit pause before setting a source aside; default 60 |
+
+See [docs/copyright.md](docs/copyright.md) for how a match is chosen, what
+each catalogue needs, and how a run survives a rate limit.
 
 ## Exit status
 
 | Status | Meaning |
 |---|---|
-| `0` | Help/version succeeded, or the requested operation completed without processing errors |
-| `1` | Invalid arguments, setup/input/output failure, download failures, or per-file metadata errors |
+| `0` | Help or version succeeded, or the operation completed without processing errors |
+| `1` | Invalid arguments, a setup/input/output failure, download failures, or per-file metadata errors |
 
-Any failed or unattempted line results in status 1 and is preserved in
-`output.txt`. A line whose audio downloaded but whose metadata could not be
-finished counts as failed, and its `.lrc` file is kept.
+For `download`, any failed or unattempted line gives status 1 and is preserved
+in `output.txt`. For `resolve`, a track Odesli has no link for is an answer
+rather than a failure and leaves the status at `0`; a lookup that failed
+outright makes it `1`.
 
-For `resolve`, a track Odesli has no link for is an answer rather than a
-failure and leaves the status at `0`; a lookup that failed outright makes it
-`1`.
+## Documentation
 
-## Troubleshooting
-
-### `cannot run 'spotdl'`
-
-Confirm `spotdl --version` works in the same shell. Otherwise pass
-`--spotdl /full/path/to/spotdl` or set `SPOTDL_PROGRAM`.
-
-### spotDL configuration blocks token-free mode
-
-Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
-`load_config`, or clear the official-API settings named in the error. Use
-`--official-api` only when that mode is intentional.
-
-### No copyright was written
-
-Either the source had no release matching both the album artist and the album
-name in the tag, or the lookup failed and said so. Both are reported during the run,
-and neither stops anything else in the tag from being written. Reissues and
-regional editions are the usual cause of a miss; `--no-copyright` turns the
-lookup off if you would rather not see it.
-
-Run `music-tag-transfer copyright <FOLDER>` later to try those albums again;
-files whose lookup missed or failed are left untouched, so nothing is lost by
-retrying. Coverage differs between the four catalogues, so trying another
-source is usually more productive than retrying the same one:
-
-```bash
-music-tag-transfer copyright "/path/to/music" --source musicbrainz --only-missing
-```
-
-`--only-missing` makes this safe to chain: each run only visits the files the
-previous ones could not fill in.
-
-### A token was rejected or has expired
-
-`Spotify rejected the token (HTTP 401)` and its Discogs equivalent mean the
-token itself, not the album. A token does not repair itself, so the source is
-retired immediately rather than spending the rest of the library discovering
-the same thing. Spotify web-player tokens expire within the hour, so a long run
-can outlive one; fetch a fresh token and run again with `--only-missing` to pick
-up where it stopped.
-
-### The run stopped part way through
-
-Every source it had was spent — a rate limit, an expired token, or a catalogue
-that would not stop throttling. This is deliberate: the alternative is several
-hundred identical failures and, on a rate limit, a longer ban. Nothing was lost.
-Re-run with `--only-missing`, and consider a fallback chain so the next run
-survives one catalogue giving up.
-
-### A download needs Deno
-
-Run `spotdl --download-deno` manually, install Deno system-wide, or rerun the
-download command with `--auto-download-deno`.
-
-### A `.lrc` file was left behind
-
-Its lyrics could not be embedded, and the reason is printed during the run and
-recorded in `music-tag-transfer-download-failures.txt`. The usual cause is a
-`.lrc` file that is empty, or an audio file whose tag could not be written.
-Retry the line from `output.txt`, or delete the `.lrc` file yourself if the
-track simply has no lyrics worth keeping.
-
-### A player shows no lyrics
-
-Confirm the frame is there, for example with mutagen:
-
-```bash
-python3 -c "from mutagen.id3 import ID3; print(ID3('track.mp3').getall('USLT'))"
-```
-
-The text should be the `.lrc` file as it was downloaded, timestamps included. If
-it is there and the player still shows nothing, the player is not reading `USLT`
-at all. If the lyrics show but do not scroll with the music, the player does not
-parse LRC timestamps out of `USLT`; nothing in the tag can fix that.
-
-### Metadata commands find no files
-
-Confirm the path is a directory and the files use one of the supported
-extensions: MP1, MP2, MP3, WAV, AIF, or AIFF. FLAC, M4A, and OGG files are not
-processed.
-
-## Using the Rust library
-
-The package also exposes the recursive metadata deletion operation:
-
-```rust
-use std::path::Path;
-use music_tag_transfer::{SUPPORTED_TAGS, delete_tags_recursively};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let encoded_by = SUPPORTED_TAGS
-        .iter()
-        .copied()
-        .find(|tag| tag.name == "Encoded-by")
-        .expect("supported tag");
-
-    let report = delete_tags_recursively(
-        Path::new("/path/to/music"),
-        &[encoded_by],
-        true,
-    )?;
-    println!("Would update {} file(s)", report.files_changed);
-    Ok(())
-}
-```
-
-The copyright refresh is available as a library call, taking anything that
-implements `CopyrightLookup` so a caller can supply its own source:
-
-```rust
-use std::path::Path;
-use music_tag_transfer::{
-    refresh_copyrights,
-    sources::{DEFAULT_MAX_WAIT, Source},
-};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut lookup = Source::MusicBrainz.open(None, DEFAULT_MAX_WAIT)?;
-    let report = refresh_copyrights(Path::new("/path/to/music"), lookup.as_mut(), false, true)?;
-    println!("Would write {} file(s)", report.files_updated);
-    Ok(())
-}
-```
-
-The same metadata rules can be applied to a single file that already has a
-`.lrc` sidecar next to it:
-
-```rust
-use std::path::Path;
-use music_tag_transfer::finalize;
-
-fn main() {
-    let report = finalize(
-        Path::new("/path/to/Artist - Song [id].mp3"),
-        Some("\u{2117} 2001 Daft Life Limited"),
-        "eng",
-    );
-    println!(
-        "Removed {} rating frame(s), embedded {} line(s)",
-        report.ratings_removed, report.lines_embedded
-    );
-    for failure in &report.failures {
-        eprintln!("{}: {}", failure.path.display(), failure.message);
-    }
-}
-```
-
-The recursive frame export is available too:
-
-```rust
-use std::path::Path;
-use music_tag_transfer::{default_csv_path, export_frames_to_csv};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let folder = Path::new("/path/to/music");
-    let report = export_frames_to_csv(folder, &default_csv_path(folder), true)?;
-    println!(
-        "Exported {} frame(s) across {} column(s)",
-        report.frames_exported, report.frame_columns
-    );
-    Ok(())
-}
-```
-
-`DeleteReport`, `ExportReport`, `ExportError`, `CopyrightReport`, `CopyrightError`,
-`MetadataReport`, `FileError`, and `TagSpec` are also exported,
-along with `album_of` for reading the album key a lookup searches with. The
-`cli`, `download`, `sources`, and `metadata` modules expose the executable's
-command configuration and entry points.
+| Page | Contents |
+|---|---|
+| [docs/download.md](docs/download.md) | Input format, the spotDL command, one folder per album, the 15-frame whitelist, synced lyrics, file naming, Spotify token modes |
+| [docs/resolve.md](docs/resolve.md) | What Odesli resolves and what it leaves alone, rate limits, exit status |
+| [docs/delete.md](docs/delete.md) | Every supported tag name and its frame ID |
+| [docs/export.md](docs/export.md) | CSV layout |
+| [docs/copyright.md](docs/copyright.md) | Choosing a catalogue, matching rules, rate limits, dry runs, change reports |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failures and what to do about them |
+| [docs/library.md](docs/library.md) | Using the crate as a Rust library |
 
 ## Development
-
-The GitHub Actions workflow runs the same three checks used locally:
 
 ```bash
 cargo fmt --check
@@ -1356,4 +225,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 ```
 
-Run all three before merging behavior or documentation changes.
+The GitHub Actions workflow runs the same three checks. Run all three before
+merging behaviour or documentation changes.
