@@ -31,6 +31,8 @@ pub const DEFAULT_MAX_WAIT: u64 = 60;
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 /// Longest backoff between attempts at a request that keeps failing.
 const MAX_BACKOFF: u64 = 30;
+/// How much of an unexpected response body to quote back.
+const BODY_EXCERPT: usize = 200;
 /// Longest gap the pacing may widen to while a source keeps saying the
 /// requests are coming too often.
 ///
@@ -71,6 +73,10 @@ pub struct Http {
     last_request: Option<Instant>,
     /// Whether a 403 means "slow down" rather than "not allowed".
     forbidden_is_throttling: bool,
+    /// What a 401 means for this source. Only the caller knows whether it sent
+    /// a credential at all, so a source that sends none can say so instead of
+    /// blaming a token that was never there.
+    unauthorized_means: Option<String>,
     /// Longest `Retry-After` to sit through before giving up on the source.
     max_wait: u64,
     /// How many times to try one request before giving up on that album.
@@ -105,6 +111,7 @@ impl Http {
             clean_requests: 0,
             last_request: None,
             forbidden_is_throttling: false,
+            unauthorized_means: None,
             max_wait: DEFAULT_MAX_WAIT,
             max_attempts: DEFAULT_MAX_ATTEMPTS,
             max_throttle_retries: DEFAULT_MAX_THROTTLE_RETRIES,
@@ -140,6 +147,15 @@ impl Http {
 
     /// Treat a 403 as throttling. The iTunes Search API answers 403 as well as
     /// 429 when it wants to be left alone; the keyed APIs mean it literally.
+    /// Replace the message a 401 produces.
+    ///
+    /// The default blames an expired token, which is right for the sources
+    /// that always send one and misleading for a source that sends none.
+    pub fn unauthorized_means(mut self, explanation: impl Into<String>) -> Self {
+        self.unauthorized_means = Some(explanation.into());
+        self
+    }
+
     pub fn forbidden_is_throttling(mut self) -> Self {
         self.forbidden_is_throttling = true;
         self
@@ -212,13 +228,22 @@ impl Http {
                 self.succeeded();
                 return Ok(None);
             }
-            // A token does not repair itself, so every remaining album would
-            // fail the same way. Spend no more requests on it.
+            // A credential does not repair itself, so every remaining album
+            // would fail the same way. Spend no more requests on it.
             if status == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(LookupError::Exhausted(format!(
-                    "{} rejected the token (HTTP 401); it is wrong or has expired",
-                    self.label
-                )));
+                let explanation = self.unauthorized_means.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} rejected the token (HTTP 401); it is wrong or has expired",
+                        self.label
+                    )
+                });
+                // A 401 nobody expected is only diagnosable from what the
+                // server said about it, so the body is quoted rather than
+                // dropped along with the response.
+                return Err(LookupError::Exhausted(match self.body_excerpt(response) {
+                    Some(body) => format!("{explanation} It answered: {body}"),
+                    None => explanation,
+                }));
             }
 
             if self.is_throttling(status) {
@@ -300,6 +325,24 @@ impl Http {
         }
     }
 
+    /// The start of a response body, for an error worth quoting the server on.
+    ///
+    /// Capped because an unexpected status is as likely to carry an HTML error
+    /// page as a sentence, and a screenful of markup explains nothing.
+    fn body_excerpt(&self, response: reqwest::Response) -> Option<String> {
+        let text = self.runtime.block_on(response.text()).ok()?;
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let excerpt: String = text.chars().take(BODY_EXCERPT).collect();
+        Some(if text.chars().count() > BODY_EXCERPT {
+            format!("{excerpt}...")
+        } else {
+            excerpt
+        })
+    }
+
     /// Whether a status means "slow down" rather than "here is your answer".
     ///
     /// MusicBrainz answers a breached rate limit with 503 rather than 429, so
@@ -332,7 +375,7 @@ impl Http {
         if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
             return LookupError::Exhausted(format!(
                 "{message}. That is {} in a row, so {} is being treated as unreachable rather \
-                 than retried for every album left",
+                 than retried for everything left to look up",
                 self.consecutive_failures, self.label
             ));
         }

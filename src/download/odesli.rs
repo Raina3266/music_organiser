@@ -33,6 +33,9 @@ const YOUTUBE_MUSIC: &str = "youtubeMusic";
 /// Storefront to answer for. Availability differs by country, and `US` is the
 /// most complete catalogue, matching the default the API itself applies.
 pub const DEFAULT_COUNTRY: &str = "US";
+/// The environment variable an API key may arrive in, named here so the
+/// unauthorized message can point at it.
+const KEY_VARIABLE: &str = super::resolve::KEY_VARIABLE;
 
 /// Gap between requests without an API key.
 ///
@@ -62,6 +65,27 @@ struct LinksResponse {
 #[derive(Debug, Deserialize)]
 struct PlatformLink {
     url: Option<String>,
+}
+
+/// What a 401 from Odesli means, which depends on what was sent.
+///
+/// Odesli documents its API as needing no key at all, so a refused anonymous
+/// request is not the caller having a stale credential -- there is none -- and
+/// saying so sends the reader looking for a token that does not exist.
+fn unauthorized_means(keyed: bool) -> String {
+    if keyed {
+        format!(
+            "{LABEL} rejected the API key (HTTP 401). Check the key, or drop it and \
+             --api-key/--api-key-file to fall back to the free tier."
+        )
+    } else {
+        format!(
+            "{LABEL} refused an anonymous request (HTTP 401). Its API is documented as \
+             needing no key, so this usually means it now wants one, or that it is \
+             refusing this address. Ask developers@song.link for a key, then set \
+             {KEY_VARIABLE} or pass --api-key."
+        )
+    }
 }
 
 /// A blocking handle on the Odesli links API.
@@ -101,6 +125,7 @@ impl Client {
         );
         Ok(Self {
             http: Http::new(LABEL, user_agent, interval)?
+                .unauthorized_means(unauthorized_means(key.is_some()))
                 .waiting_at_most(limits.max_wait)
                 .attempting_at_most(limits.max_attempts)
                 .waiting_out_throttling(limits.max_throttle_retries),

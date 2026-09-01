@@ -50,6 +50,10 @@ pub struct Report {
     /// Bare Spotify tracks Odesli knew nothing about, or had no YouTube Music
     /// link for. They stay bare, and spotDL will search as before.
     pub unresolved: usize,
+    /// Bare Spotify tracks the run never got to ask about, because Odesli had
+    /// already stopped answering. Counted apart from `unresolved`: nobody has
+    /// said anything about these, so a rerun may well place them.
+    pub not_asked: usize,
     /// Lines that were already pairs, and so had nothing left to resolve.
     pub already_paired: usize,
     /// Albums, playlists, and YouTube links: not one track, so not pairable.
@@ -104,7 +108,7 @@ pub fn run(config: Config) -> Result<i32, String> {
                 // copied through rather than spending a doomed request, and a
                 // long wait, on every line that is left.
                 if report.gave_up_early {
-                    report.unresolved += 1;
+                    report.not_asked += 1;
                     lines.push(entry.query.clone());
                     continue;
                 }
@@ -240,9 +244,10 @@ fn summarize(report: &Report, output: &Path, lines: usize) {
     }
     if report.gave_up_early {
         println!(
-            "  {} stopped answering partway through, so the rest of the file was copied \
-             through without being asked about.",
+            "  {} stopped answering, so {} further track(s) were never asked about and \
+             stay bare. Nothing is known about those yet, so a rerun may still place them.",
             odesli::LABEL,
+            report.not_asked,
         );
     }
 }
@@ -302,6 +307,7 @@ mod tests {
     const TRACK: &str = "https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW";
     const OTHER: &str = "https://open.spotify.com/track/4aawyAB9vmqN3uQ7FjRGTy";
     const VIDEO: &str = "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+    const THIRD: &str = "https://open.spotify.com/track/37i9dQZF1DXcBWIGoYBM5M";
     const ALBUM: &str = "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy";
 
     fn links(youtube_music: &str) -> String {
@@ -338,7 +344,7 @@ mod tests {
                     kind: SpotifyKind::Track,
                     ..
                 } => {
-                    report.unresolved += 1;
+                    report.not_asked += 1;
                     lines.push(entry.query.clone());
                 }
                 _ => {
@@ -487,7 +493,30 @@ mod tests {
 
         assert_eq!(links_of(&written), vec![TRACK, OTHER]);
         assert!(report.gave_up_early);
-        assert_eq!(report.unresolved, 1, "the line after the failure is copied");
+        // Counted apart from unresolved: Odesli never said anything about it.
+        assert_eq!(report.not_asked, 1, "the line after the failure is copied");
+        assert_eq!(report.unresolved, 0);
+        assert_eq!(code, 1);
+    }
+
+    /// A 401 stops the run on its first track. The three after it are copied
+    /// through unasked, and the summary must not claim Odesli could not place
+    /// them -- Odesli was never asked, and a rerun may well succeed.
+    #[test]
+    fn a_refused_run_reports_the_rest_as_unasked_rather_than_unplaceable() {
+        let input_text = format!("{TRACK}\n{OTHER}\n{THIRD}\n");
+        let refused = status("401 Unauthorized", r#"{"code":"could not resolve entity"}"#);
+
+        let (written, report, code) = resolve(&input_text, &[refused]);
+
+        assert_eq!(links_of(&written), vec![TRACK, OTHER, THIRD]);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.not_asked, 2);
+        assert_eq!(
+            report.unresolved, 0,
+            "nothing was placed and nothing was refused a link"
+        );
+        assert!(report.gave_up_early);
         assert_eq!(code, 1);
     }
 
