@@ -209,7 +209,7 @@ impl Client {
         };
         let key = match &track.isrc {
             Some(isrc) => format!("isrc:{isrc}"),
-            None => format!("{} - {title}", track.artist),
+            None => format!("{} - {title}", track.performer()),
         };
         let cache_key = (key, include_language);
         if let Some(cached) = self.tracks.get(&cache_key) {
@@ -231,9 +231,12 @@ impl Client {
         // title have to do, ranked the same way releases are.
         let query = match &track.isrc {
             Some(isrc) => format!("isrc:{}", quote_for_lucene(isrc)),
+            // The performer, not the album artist: MusicBrainz credits a
+            // recording to whoever played it, so a compilation searched by
+            // "Various Artists" matches nothing at all.
             None => format!(
                 "artist:{} AND recording:{}",
-                quote_for_lucene(&track.artist),
+                quote_for_lucene(track.performer()),
                 quote_for_lucene(title)
             ),
         };
@@ -420,7 +423,7 @@ fn best_recording(
             let artist = recording
                 .artist_credit
                 .iter()
-                .filter_map(|credit| confidence(credit.name.as_deref(), &track.artist))
+                .filter_map(|credit| confidence(credit.name.as_deref(), track.performer()))
                 .min()?;
             Some(((name, artist), recording))
         })
@@ -480,6 +483,7 @@ mod tests {
         AlbumEvidence {
             artist: artist.to_owned(),
             album: album.to_owned(),
+            track_artist: None,
             isrc: None,
             year: None,
             total_tracks: None,
@@ -713,6 +717,56 @@ mod tests {
         let mut evidence = wanting(artist, album);
         evidence.track_title = Some(title.to_owned());
         evidence
+    }
+
+    /// A compilation credits the release to "Various Artists" while the
+    /// recording is credited to whoever played it. Searching by the album
+    /// artist finds nothing and filters every candidate out, which is how a
+    /// whole compilation ends up with no ISRC and no explanation.
+    #[test]
+    fn a_recording_is_looked_up_by_its_performer_not_the_album_artist() {
+        let server = Server::answering(&[
+            r#"{"recordings":[
+                {"id":"right","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"isrcs":["GBUM71029604"],"relations":[]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+        let mut evidence = track(
+            "Various Artists",
+            "Now That's What I Call Music",
+            "One More Time",
+        );
+        evidence.track_artist = Some("Daft Punk".to_owned());
+
+        let found = client.track_metadata(&evidence, false).unwrap();
+
+        assert_eq!(found.isrc.as_deref(), Some("GBUM71029604"));
+        let asked = server.requests();
+        assert_eq!(
+            asked[0].target,
+            "/?query=artist%3A%22Daft+Punk%22+AND+recording%3A%22One+More+Time%22&limit=10&fmt=json",
+            "the performer is searched for, not Various Artists"
+        );
+    }
+
+    /// Without a separate track artist the album artist is still all there is,
+    /// so the ordinary single-artist album keeps working exactly as before.
+    #[test]
+    fn the_album_artist_is_used_when_the_tag_names_no_performer() {
+        let server = Server::answering(&[
+            r#"{"recordings":[
+                {"id":"right","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}
+            ]}"#,
+            r#"{"isrcs":["GBUM71029604"],"relations":[]}"#,
+        ]);
+        let mut client = Client::pointing_at(&server.address);
+
+        let found = client
+            .track_metadata(&track("Daft Punk", "Discovery", "One More Time"), false)
+            .unwrap();
+
+        assert_eq!(found.isrc.as_deref(), Some("GBUM71029604"));
     }
 
     /// The language comes from the work -- the song as written -- reached

@@ -149,6 +149,7 @@ mod tests {
         AlbumEvidence {
             artist: artist.to_owned(),
             album: album.to_owned(),
+            track_artist: None,
             isrc: None,
             year: None,
             total_tracks: None,

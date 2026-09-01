@@ -66,8 +66,19 @@ impl Error for LookupError {}
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct AlbumEvidence {
     /// The album artist, or the track artist when there is no album artist.
+    ///
+    /// This is who the *release* is credited to, which is what a release
+    /// search wants. It is not always who played the track: a compilation
+    /// credits "Various Artists" and a featured track credits only the lead,
+    /// so a recording search wants [`AlbumEvidence::performer`] instead.
     pub artist: String,
     pub album: String,
+    /// The track artist, from `TPE1`, when the tag names one separately.
+    ///
+    /// Who actually performed this recording, which is what MusicBrainz
+    /// credits a recording to. `None` when the tag has no track artist, or
+    /// when it is the same string as the album artist.
+    pub track_artist: Option<String>,
     /// From `TSRC`. A globally unique identifier for the *recording*, which
     /// pins it exactly on the sources that can search by it.
     ///
@@ -88,6 +99,17 @@ impl AlbumEvidence {
     /// The cache key: one lookup per album, however many tracks it has.
     pub fn key(&self) -> (String, String) {
         (self.artist.clone(), self.album.clone())
+    }
+
+    /// Who to search a *recording* by: the performer if the tag names one,
+    /// and otherwise the album artist as the only name available.
+    ///
+    /// A recording is credited to whoever played it, so matching it against
+    /// the album artist fails on exactly the releases where the two differ --
+    /// compilations, features, soundtracks -- and those are common enough that
+    /// the difference decides whether a lookup finds anything at all.
+    pub fn performer(&self) -> &str {
+        self.track_artist.as_deref().unwrap_or(&self.artist)
     }
 
     /// Whether there is enough to search with at all.

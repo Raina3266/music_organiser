@@ -68,6 +68,10 @@ pub struct MetadataReport {
     pub copyrights_written: usize,
     /// Files that received a MusicBrainz `TSRC` value.
     pub isrcs_written: usize,
+    /// Files that finished with no ISRC at all: the tag had none and the
+    /// lookup found none. Counted so a run can say so, because a silently
+    /// missing frame looks the same as a lookup that never ran.
+    pub isrcs_missing: usize,
     /// Files whose copyright lookup failed outright. The rest of the tag is
     /// still rewritten, so this is a warning rather than a failure.
     pub copyright_lookups_failed: usize,
@@ -98,6 +102,7 @@ impl MetadataReport {
         self.frames_stripped += other.frames_stripped;
         self.copyrights_written += other.copyrights_written;
         self.isrcs_written += other.isrcs_written;
+        self.isrcs_missing += other.isrcs_missing;
         self.copyright_lookups_failed += other.copyright_lookups_failed;
         self.languages_detected += other.languages_detected;
         self.languages_looked_up += other.languages_looked_up;
@@ -240,6 +245,9 @@ pub fn finalize_with_isrc(
     report.frames_stripped = frames_stripped;
     report.copyrights_written = usize::from(copyright.is_some());
     report.isrcs_written = usize::from(isrc.is_some());
+    // Only a file that ends with nothing in the frame counts as missing: one
+    // whose ISRC spotDL already wrote needed no lookup and lacks nothing.
+    report.isrcs_missing = usize::from(isrc.is_none() && text(&tag, ISRC_FRAME).is_none());
     report.languages_detected = usize::from(detected);
     report.languages_looked_up = usize::from(known_language.is_some());
     report
@@ -290,9 +298,17 @@ pub(crate) fn album_key(tag: &Tag) -> Option<(String, String)> {
 /// rather than preventing it.
 pub(crate) fn album_evidence(tag: &Tag) -> Option<AlbumEvidence> {
     let (artist, album) = album_key(tag)?;
+    // Only worth carrying when it differs; otherwise it is the album artist
+    // under another name and every caller would do the same fallback anyway.
+    let track_artist = tag
+        .artist()
+        .map(str::trim)
+        .filter(|performer| !performer.is_empty() && *performer != artist)
+        .map(str::to_owned);
     Some(AlbumEvidence {
         artist,
         album,
+        track_artist,
         isrc: text(tag, ISRC_FRAME).and_then(|isrc| normalize_isrc(&isrc)),
         year: recorded_year(tag),
         // The total in "5/12", not the track's own number.
@@ -851,6 +867,53 @@ mod tests {
         assert_eq!(evidence.isrc, None);
         assert_eq!(evidence.year, None);
         assert_eq!(evidence.total_tracks, None);
+    }
+
+    /// A compilation credits the release to one name and the track to
+    /// another. Both are kept: the release search wants the album artist and
+    /// the recording search wants whoever actually played it.
+    #[test]
+    fn a_compilation_keeps_the_performer_apart_from_the_album_artist() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_album_artist("Various Artists");
+        tag.set_artist("Daft Punk");
+        tag.set_album("Now That's What I Call Music");
+
+        let evidence = album_evidence(&tag).unwrap();
+
+        assert_eq!(evidence.artist, "Various Artists");
+        assert_eq!(evidence.track_artist.as_deref(), Some("Daft Punk"));
+        assert_eq!(evidence.performer(), "Daft Punk");
+    }
+
+    /// An ordinary album names the same artist twice, and carrying it twice
+    /// would only invite the two to drift apart.
+    #[test]
+    fn one_artist_on_both_frames_is_not_carried_twice() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_album_artist("Daft Punk");
+        tag.set_artist("Daft Punk");
+        tag.set_album("Discovery");
+
+        let evidence = album_evidence(&tag).unwrap();
+
+        assert_eq!(evidence.track_artist, None);
+        assert_eq!(evidence.performer(), "Daft Punk");
+    }
+
+    /// With no album artist the track artist becomes both, so there is still
+    /// nothing separate to carry.
+    #[test]
+    fn a_tag_with_only_a_track_artist_uses_it_for_both() {
+        let mut tag = Tag::with_version(Version::Id3v23);
+        tag.set_artist("Daft Punk");
+        tag.set_album("Discovery");
+
+        let evidence = album_evidence(&tag).unwrap();
+
+        assert_eq!(evidence.artist, "Daft Punk");
+        assert_eq!(evidence.track_artist, None);
+        assert_eq!(evidence.performer(), "Daft Punk");
     }
 
     #[test]

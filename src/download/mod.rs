@@ -188,6 +188,14 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         metadata_totals.languages_looked_up,
         metadata_totals.languages_detected
     );
+    if metadata_totals.isrcs_missing > 0 {
+        println!(
+            "No ISRC could be found for {} file(s): a token-free spotDL session supplies none, \
+             and MusicBrainz had no recording matching the track artist and title, or knew the \
+             recording but records no ISRC for it. Everything else in their tags was written.",
+            metadata_totals.isrcs_missing
+        );
+    }
     if metadata_totals.copyright_lookups_failed > 0 {
         println!(
             "Copyright lookup failed on every available source for {} file(s); everything else in their tags was still written.",

@@ -180,7 +180,9 @@ extra metadata written by both spotDL and FFmpeg.
 Other `APIC` picture types, such as back covers and artist images, are also
 deleted. A tag on this list is kept when the source provides it. When a
 token-free download has no `TSRC`, MusicBrainz is searched by recording title
-and artist and its ISRC is written when found. `TCOP` and `TLAN` are also
+and track artist and its ISRC is written when found. A run says how many files
+ended with no ISRC at all, since a silently missing frame looks the same as a
+lookup that never ran. `TCOP` and `TLAN` are also
 filled by this program, and the cleaned synced lyrics are written to `USLT`.
 
 ### Copyright
@@ -225,8 +227,14 @@ English song on a Korean album would be labelled Korean. The work is where
 MusicBrainz records what the song is actually sung in.
 
 The recording is found by ISRC where the tag has one, which is exact, and by
-artist and title otherwise, ranked the same way releases are so that a search
-for a common title cannot return somebody else's song of that name.
+**track artist** and title otherwise, ranked the same way releases are so that
+a search for a common title cannot return somebody else's song of that name.
+
+The track artist matters: MusicBrainz credits a recording to whoever performed
+it, so a compilation searched by its album artist — "Various Artists" — matches
+nothing at all. `TPE1` is used when it differs from the album artist, and the
+album artist still identifies the *release* for the copyright lookup, where it
+is the right name.
 
 Work data is patchy — plenty of recordings have no work linked, and plenty of
 works have no language recorded — so a miss is ordinary and costs nothing: the
