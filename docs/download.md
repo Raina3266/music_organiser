@@ -180,9 +180,9 @@ extra metadata written by both spotDL and FFmpeg.
 Other `APIC` picture types, such as back covers and artist images, are also
 deleted. A tag on this list is kept when the source provides it. When a
 token-free download has no `TSRC`, MusicBrainz is searched by recording title
-and track artist and its ISRC is written when found. A run says how many files
-ended with no ISRC at all, since a silently missing frame looks the same as a
-lookup that never ran. `TCOP` and `TLAN` are also
+and track artist and its ISRC is written when found; [Deezer](#isrc) is asked
+next when MusicBrainz has none. A run says how many files ended with no ISRC at
+all, since a silently missing frame looks the same as a lookup that never ran. `TCOP` and `TLAN` are also
 filled by this program, and the cleaned synced lyrics are written to `USLT`.
 
 ### Copyright
@@ -214,6 +214,34 @@ Two things to know about the API: it is throttled per IP, so requests are
 spaced out and a throttled response is retried a few times before giving up;
 and it is queried against the US storefront, whose catalogue is the most
 complete. The `℗` line is the label's and rarely differs between storefronts.
+
+### ISRC
+
+`TSRC` is the one frame spotDL fills only in official-API mode, so a token-free
+download arrives without it. Two catalogues are asked, in order:
+
+| Source | Asked | Needs |
+|---|---|---|
+| MusicBrainz | Always, when the tag has no ISRC | Nothing; `MUSICBRAINZ_CONTACT` is polite |
+| Deezer | Only when MusicBrainz found none | Nothing |
+
+Both are searched by **track artist** and title, and a candidate is used only
+when its title *and* its artist match, because a wrong ISRC is worse than none
+— every later lookup would follow it confidently to the wrong recording. A
+malformed value is discarded rather than written.
+
+Deezer is second rather than first because MusicBrainz's catalogue is fuller,
+but it is a volunteer database and a track nobody has entered is simply absent;
+Deezer is commercial and strongest on recent and mainstream releases, which is
+where MusicBrainz is thinnest. They miss different tracks, which is the point
+of asking both. Deezer costs nothing on tracks MusicBrainz already knows,
+because it is only asked when MusicBrainz came back empty.
+
+Only the ISRC is taken from Deezer. It publishes no copyright line at all — its
+album object carries a `label`, which is the marketing imprint rather than the
+phonographic copyright holder, and the two are routinely different companies.
+Assembling a `℗` line from it would read right and name the wrong entity, so
+`TCOP` is left to iTunes and MusicBrainz.
 
 ### Language
 

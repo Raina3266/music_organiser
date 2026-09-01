@@ -13,7 +13,8 @@ use crate::CopyrightLookup;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
 use crate::sources::{
-    Limits, itunes::Client as ItunesClient, musicbrainz::Client as MusicBrainzClient,
+    Limits, deezer::Client as DeezerClient, itunes::Client as ItunesClient,
+    musicbrainz::Client as MusicBrainzClient,
 };
 use std::env;
 use std::fs;
@@ -111,13 +112,16 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         env::var("MUSICBRAINZ_CONTACT").ok().as_deref(),
         Limits::default(),
     )?);
+    // Asked only when MusicBrainz has no ISRC, so it costs nothing on the
+    // tracks that catalogue already knows.
+    let mut deezer = Some(DeezerClient::new(Limits::default())?);
     if config.no_language_lookup {
         println!(
-            "MusicBrainz will look up missing ISRCs and copyright fallbacks; language will come from the lyrics."
+            "MusicBrainz will look up missing ISRCs and copyright fallbacks, with Deezer as a second ISRC source; language will come from the lyrics."
         );
     } else {
         println!(
-            "MusicBrainz will look up missing ISRCs and track languages; language falls back to the lyrics."
+            "MusicBrainz will look up missing ISRCs and track languages, with Deezer as a second ISRC source; language falls back to the lyrics."
         );
     }
     let total = input.entries.len();
@@ -152,6 +156,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
                         &before,
                         itunes.as_mut(),
                         musicbrainz.as_mut(),
+                        deezer.as_mut(),
                         &mut metadata_totals,
                     )
                 } else {
@@ -191,8 +196,9 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     if metadata_totals.isrcs_missing > 0 {
         println!(
             "No ISRC could be found for {} file(s): a token-free spotDL session supplies none, \
-             and MusicBrainz had no recording matching the track artist and title, or knew the \
-             recording but records no ISRC for it. Everything else in their tags was written.",
+             and neither MusicBrainz nor Deezer had a recording matching the track artist and \
+             title, or either knew it but records no ISRC. Everything else in their tags was \
+             written.",
             metadata_totals.isrcs_missing
         );
     }
@@ -268,6 +274,7 @@ fn apply_metadata(
     before: &MusicSnapshot,
     mut itunes: Option<&mut ItunesClient>,
     mut musicbrainz: Option<&mut MusicBrainzClient>,
+    mut deezer: Option<&mut DeezerClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
     let files = match downloaded_files(config, entry, before) {
@@ -307,10 +314,22 @@ fn apply_metadata(
             _ => Default::default(),
         };
         let existing_isrc = evidence.as_ref().and_then(|track| track.isrc.clone());
-        let looked_up_isrc = existing_isrc
+        let mut looked_up_isrc = existing_isrc
             .is_none()
             .then_some(track_metadata.isrc)
             .flatten();
+        // MusicBrainz is a volunteer catalogue, so a track nobody has entered
+        // is simply absent from it. Deezer is asked next because it misses a
+        // different set of tracks, and only when there is still nothing.
+        if existing_isrc.is_none()
+            && looked_up_isrc.is_none()
+            && let (Some(client), Some(track)) = (deezer.as_deref_mut(), evidence.as_ref())
+        {
+            match client.isrc(track) {
+                Ok(found) => looked_up_isrc = found,
+                Err(error) => eprintln!("ISRC (Deezer): {error}"),
+            }
+        }
         let isrc = existing_isrc.or_else(|| looked_up_isrc.clone());
         if let Some(track) = evidence.as_mut()
             && track.isrc.is_none()

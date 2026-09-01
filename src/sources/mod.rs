@@ -7,6 +7,7 @@
 //! the source is a choice rather than a setting, and the `copyright` command
 //! asks for it when it is not told.
 
+pub mod deezer;
 pub mod discogs;
 pub(crate) mod http;
 pub mod itunes;

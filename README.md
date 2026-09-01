@@ -74,8 +74,8 @@ music-tag-transfer download links.txt --output ./music
 
 Every line is downloaded as MP3 with synchronised lyrics, and each ID3v2.3 tag
 is limited to the 15 supported metadata types. No credentials are needed:
-copyright comes from iTunes with a MusicBrainz fallback, and both are open
-without an account.
+copyright comes from iTunes with a MusicBrainz fallback, and a missing ISRC
+from MusicBrainz with a Deezer fallback. All three are open without an account.
 
 ## Usage
 
