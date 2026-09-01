@@ -9,6 +9,10 @@
 //! A track Odesli cannot place stays a bare Spotify link on purpose. Dropping
 //! it would lose a song that spotDL can very likely still find by searching;
 //! leaving it alone costs nothing and keeps the file complete.
+//!
+//! Pairs are written `SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL`, the Spotify link
+//! first, so a resolved file lines up with the file of Spotify links it came
+//! from. `download` reads a pair in either order, so this costs nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -90,7 +94,7 @@ pub fn run(config: Config) -> Result<i32, String> {
         match &entry.source {
             Source::Pair { .. } => {
                 report.already_paired += 1;
-                lines.push(entry.query.clone());
+                lines.push(input::spotify_first(&entry.query));
             }
             Source::Spotify {
                 kind: SpotifyKind::Track,
@@ -247,7 +251,7 @@ fn summarize(report: &Report, output: &Path, lines: usize) {
 fn write_lines(output: &Path, source: &Path, lines: &[String]) -> Result<(), String> {
     let mut contents = format!(
         "# Resolved from {} by {} {}.\n\
-         # Each pair is YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL; a bare link is one that\n\
+         # Each pair is SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL; a bare link is one that\n\
          # could not be pinned, and spotDL will search for it as usual.\n",
         source.display(),
         env!("CARGO_PKG_NAME"),
@@ -322,7 +326,7 @@ mod tests {
             match &entry.source {
                 Source::Pair { .. } => {
                     report.already_paired += 1;
-                    lines.push(entry.query.clone());
+                    lines.push(input::spotify_first(&entry.query));
                 }
                 Source::Spotify {
                     kind: SpotifyKind::Track,
@@ -362,7 +366,7 @@ mod tests {
     fn pins_a_bare_track_to_the_pair_spotdl_reads() {
         let (written, report, code) = resolve(TRACK, &[ok(&links(VIDEO))]);
 
-        assert_eq!(links_of(&written), vec![format!("{VIDEO}|{TRACK}")]);
+        assert_eq!(links_of(&written), vec![format!("{TRACK}|{VIDEO}")]);
         assert_eq!(report.resolved, 1);
         assert_eq!(code, 0);
     }
@@ -394,20 +398,21 @@ mod tests {
         assert_eq!(code, 0);
     }
 
+    /// A pair the input already carried is copied through, but rewritten into
+    /// the order the resolved lines use so the file reads as one thing.
     #[test]
     fn copies_pairs_albums_playlists_and_youtube_links_through_untouched() {
-        let pair = format!("{VIDEO}|{TRACK}");
         let input_text =
-            format!("{pair}\n{ALBUM}\nhttps://music.youtube.com/watch?v=9bZkp7q19f0\n");
+            format!("{VIDEO}|{TRACK}\n{ALBUM}\nhttps://music.youtube.com/watch?v=9bZkp7q19f0\n");
 
         let (written, report, code) = resolve(&input_text, &[]);
 
         assert_eq!(
             links_of(&written),
             vec![
-                pair.as_str(),
-                ALBUM,
-                "https://music.youtube.com/watch?v=9bZkp7q19f0",
+                format!("{TRACK}|{VIDEO}"),
+                ALBUM.to_owned(),
+                "https://music.youtube.com/watch?v=9bZkp7q19f0".to_owned(),
             ]
         );
         assert_eq!(report.already_paired, 1);
@@ -416,12 +421,12 @@ mod tests {
     }
 
     /// A pair written Spotify-first is still a pair: it must not be sent to
-    /// Odesli a second time.
+    /// Odesli a second time, and it comes back out as it went in.
     #[test]
     fn a_pair_written_spotify_first_is_not_looked_up_again() {
         let (written, report, _) = resolve(&format!("{TRACK}|{VIDEO}"), &[]);
 
-        assert_eq!(links_of(&written), vec![format!("{VIDEO}|{TRACK}")]);
+        assert_eq!(links_of(&written), vec![format!("{TRACK}|{VIDEO}")]);
         assert_eq!(report.already_paired, 1);
         assert_eq!(report.resolved, 0);
     }
@@ -459,9 +464,9 @@ mod tests {
         assert_eq!(
             links_of(&written),
             vec![
-                format!("{VIDEO}|{TRACK}"),
+                format!("{TRACK}|{VIDEO}"),
                 ALBUM.to_owned(),
-                format!("{other_video}|{OTHER}"),
+                format!("{OTHER}|{other_video}"),
             ]
         );
         assert_eq!(report.resolved, 2);

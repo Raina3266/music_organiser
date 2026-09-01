@@ -186,18 +186,43 @@ struct Normalized {
     source: Source,
 }
 
-/// Build the pair line that names `spotify` as the metadata and `youtube` as
-/// the audio.
+/// Build the pair line the resolver writes: the Spotify track it started from,
+/// then the YouTube Music URL that pins that track's audio.
+///
+/// Spotify first because a resolved file is read next to the file of Spotify
+/// links it came from, and the eye wants the two in the same column. `download`
+/// accepts a pair in either order and puts it back into spotDL's order before
+/// handing it over, so the order here is only about who reads the file.
 ///
 /// The resolver hands over one URL it read from an input file and one it was
 /// given by Odesli, so both go through the same validation an input file gets.
 /// That way a resolved file cannot contain a line `download` would later
-/// reject, and the pair comes back in the order spotDL reads.
+/// reject.
 pub(super) fn pair_line(spotify: &str, youtube: &str) -> Result<String, String> {
     if youtube.contains(PAIR_SEPARATOR) || spotify.contains(PAIR_SEPARATOR) {
         return Err(format!("a URL contains the {PAIR_SEPARATOR:?} separator"));
     }
-    Ok(normalize_pair(&format!("{youtube}{PAIR_SEPARATOR}{spotify}"))?.query)
+    let youtube = normalize_youtube_url(youtube)?;
+    let track_id = spotify_track_id(spotify)?;
+    Ok(format!(
+        "{}{PAIR_SEPARATOR}{youtube}",
+        spotify_track_url(&track_id)
+    ))
+}
+
+/// Rewrite an already-normalized pair query into the order [`pair_line`]
+/// writes, so a pair copied through a resolved file reads like the pairs
+/// resolved into it rather than betraying which of the two it was.
+pub(super) fn spotify_first(pair_query: &str) -> String {
+    match pair_query.split_once(PAIR_SEPARATOR) {
+        Some((youtube, spotify)) => format!("{spotify}{PAIR_SEPARATOR}{youtube}"),
+        None => pair_query.to_owned(),
+    }
+}
+
+/// The canonical URL for a Spotify track ID.
+fn spotify_track_url(track_id: &str) -> String {
+    format!("https://open.spotify.com/track/{track_id}")
 }
 
 /// Validate one input line, whichever of the three forms it uses.
@@ -247,7 +272,7 @@ fn normalize_pair(raw: &str) -> Result<Normalized, String> {
     let youtube = normalize_youtube_url(youtube)?;
     let track_id = spotify_track_id(spotify)?;
     Ok(Normalized {
-        query: format!("{youtube}{PAIR_SEPARATOR}https://open.spotify.com/track/{track_id}"),
+        query: format!("{youtube}{PAIR_SEPARATOR}{}", spotify_track_url(&track_id)),
         source: Source::Pair { track_id },
     })
 }
@@ -483,7 +508,7 @@ fn before_query_or_fragment(value: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, SpotifyKind, normalize_line, parse};
+    use super::{Source, SpotifyKind, normalize_line, pair_line, parse, spotify_first};
 
     const TRACK: &str = "https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW";
     const VIDEO: &str = "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
@@ -501,6 +526,42 @@ mod tests {
         .unwrap();
         assert_eq!(pair.query, PAIR);
         assert_eq!(pair.source.track_id(), Some("02Q0SXOsk74oV4hesiL6JW"));
+    }
+
+    #[test]
+    fn builds_a_resolved_pair_line_spotify_first() {
+        let line = pair_line(
+            "https://open.spotify.com/intl-fr/track/02Q0SXOsk74oV4hesiL6JW?si=1",
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RD",
+        )
+        .unwrap();
+
+        // Spotify first, both halves normalized, and still a line `download`
+        // reads back to the same download as the canonical pair.
+        assert_eq!(line, format!("{TRACK}|{VIDEO}"));
+        assert_eq!(normalize_line(&line).unwrap().query, PAIR);
+    }
+
+    #[test]
+    fn a_resolved_pair_line_refuses_what_an_input_file_would_refuse() {
+        // Not a YouTube URL, an album rather than a track, and a URL that
+        // already carries the separator.
+        assert!(pair_line(TRACK, "https://example.com/watch?v=x").is_err());
+        assert!(
+            pair_line(
+                "https://open.spotify.com/album/4aawyAB9vmqN3uQ7FjRGTy",
+                VIDEO
+            )
+            .is_err()
+        );
+        assert!(pair_line(TRACK, &format!("{VIDEO}|extra")).is_err());
+    }
+
+    #[test]
+    fn copies_a_pair_through_in_the_order_resolved_lines_use() {
+        assert_eq!(spotify_first(PAIR), format!("{TRACK}|{VIDEO}"));
+        // A line that is not a pair is left exactly as it is.
+        assert_eq!(spotify_first(TRACK), TRACK);
     }
 
     #[test]

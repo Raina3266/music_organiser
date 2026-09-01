@@ -52,7 +52,7 @@ instead.
 ## Quick start
 
 Paste the links you want into a text file. Spotify links, YouTube Music links,
-and `YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pairs can be mixed freely:
+and pairs of the two (in either order) can be mixed freely:
 
 ```text
 # a Spotify link: spotDL searches YouTube for the audio
@@ -126,6 +126,13 @@ music-tag-transfer resolve links.txt          # writes links-resolved.txt
 music-tag-transfer download links-resolved.txt --output ./music
 ```
 
+A resolved track is written `SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL`, the Spotify
+link first, so the file lines up with the list of Spotify links it came from:
+
+```text
+https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW|https://music.youtube.com/watch?v=dQw4w9WgXcQ
+```
+
 | Option | Meaning |
 |---|---|
 | `OUTPUT_FILE` | Where to write; defaults to the input name with `-resolved` added |
@@ -137,10 +144,11 @@ music-tag-transfer download links-resolved.txt --output ./music
 | `--max-wait SECONDS` | Longest rate-limit wait to sit through |
 | `--max-throttle-retries N` | Times to wait out throttling for one track |
 
-Albums, playlists, YouTube links, existing pairs, and tracks Odesli cannot
-place are all copied through untouched, so the output is always a drop-in
-replacement for the input. Without a key Odesli allows ten requests a minute,
-so a hundred tracks takes ten minutes. See [docs/resolve.md](docs/resolve.md).
+Albums, playlists, YouTube links, and tracks Odesli cannot place are all copied
+through unchanged, so the output is always a drop-in replacement for the input;
+a pair the input already carried is copied through in that same Spotify-first
+order. Without a key Odesli allows ten requests a minute, so a hundred tracks
+takes ten minutes. See [docs/resolve.md](docs/resolve.md).
 
 ### delete
 

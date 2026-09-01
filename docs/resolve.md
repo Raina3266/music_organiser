@@ -13,6 +13,19 @@ than by matching text, so it disagrees with a search precisely where a search
 goes wrong. The `resolve` command asks it which YouTube Music track each
 Spotify track is, and rewrites those lines as pairs.
 
+A resolved line is written `SPOTIFY_TRACK_URL|YOUTUBE_MUSIC_URL` — the Spotify
+link first, so the resolved file reads in the same column order as the list of
+Spotify links it came from:
+
+```text
+https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW|https://music.youtube.com/watch?v=dQw4w9WgXcQ
+```
+
+spotDL itself reads a pair the other way round, but `download` accepts either
+order and swaps it back before handing it over, so nothing is lost by writing
+the readable one. A pair the input file already carried is rewritten into the
+same order, so a resolved file never mixes the two.
+
 ## Syntax
 
 ```text
@@ -36,7 +49,7 @@ else is copied through untouched:
 | Spotify track | Asks Odesli, and writes a pair when it answers |
 | Spotify album or playlist | Copied through — an album is not one track |
 | YouTube Music link | Copied through — the audio is already pinned |
-| An existing pair | Copied through — there is nothing left to resolve |
+| An existing pair | Copied through, in Spotify-first order — there is nothing left to resolve |
 
 A track Odesli cannot place stays a bare Spotify link on purpose. Dropping it
 would lose a song spotDL can very likely still find by searching; leaving it
