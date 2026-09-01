@@ -7,7 +7,7 @@ library on disk.
 | Command | Purpose |
 |---|---|
 | [`download`](docs/download.md) | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
-| [`resolve`](docs/resolve.md) | Pin Spotify links to their YouTube Music track through Odesli, so `download` does not have to search |
+| [`resolve`](docs/resolve.md) | Pin Spotify links to their YouTube Music track through Odesli, so `download` does not have to search. **Needs an Odesli API key** — anonymous access has been withdrawn |
 | [`delete`](docs/delete.md) | Remove selected ID3 frames recursively |
 | [`export`](docs/export.md) | Write every ID3 frame found recursively into one CSV file |
 | [`copyright`](docs/copyright.md) | Look the `TCOP` copyright message up again for music already on disk |
@@ -143,6 +143,11 @@ https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW|https://music.youtube.com/
 | `--max-attempts N` | Attempts per request before giving up on it |
 | `--max-wait SECONDS` | Longest rate-limit wait to sit through |
 | `--max-throttle-retries N` | Times to wait out throttling for one track |
+
+Odesli has withdrawn anonymous access to this API, so without a key the run
+stops at the first track and leaves every line bare; `download` still handles
+those, since spotDL searches for them as before. See
+[docs/resolve.md](docs/resolve.md).
 
 Albums, playlists, YouTube links, and tracks Odesli cannot place are all copied
 through unchanged, so the output is always a drop-in replacement for the input;

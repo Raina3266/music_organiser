@@ -2,6 +2,13 @@
 
 [← Back to the README](../README.md)
 
+> **Odesli now requires an API key.** Anonymous requests to its `v1-alpha.1`
+> API are refused with `PUBLIC_API_ACCESS_DEPRECATED`, and the whole namespace
+> is deprecated. Without a key `resolve` stops at the first track and leaves
+> every line bare, which `download` still handles — spotDL searches for them as
+> it always did. Ask developers@song.link for a key if you want the command
+> back.
+
 `download` hands a bare Spotify link to spotDL, which searches YouTube Music
 for the title and artist and scores what comes back. That is a good guess, and
 an exact-source pair exists to replace a guess — so a pair is only worth

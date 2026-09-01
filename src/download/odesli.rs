@@ -16,6 +16,12 @@
 //! `youtube` link for the same track, but that is as likely to be the music
 //! video — wrong length, spoken intro, live take — and pinning the audio to
 //! the wrong recording is worse than letting spotDL search for the right one.
+//!
+//! Odesli has since withdrawn anonymous access to this API and deprecated the
+//! `v1-alpha.1` namespace it lives in, so a key is required and the endpoint
+//! is on borrowed time. Nothing here can work around that: without a key the
+//! first request comes back `PUBLIC_API_ACCESS_DEPRECATED`, the run stops, and
+//! every line is left bare for spotDL to search as it did before.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -69,21 +75,22 @@ struct PlatformLink {
 
 /// What a 401 from Odesli means, which depends on what was sent.
 ///
-/// Odesli documents its API as needing no key at all, so a refused anonymous
-/// request is not the caller having a stale credential -- there is none -- and
-/// saying so sends the reader looking for a token that does not exist.
+/// A run that sent no credential has no stale token to blame, and saying it
+/// has sends the reader hunting for one that does not exist. Since v1-alpha.1
+/// was deprecated, an anonymous request is refused outright with
+/// `PUBLIC_API_ACCESS_DEPRECATED`, so that is what the message says.
 fn unauthorized_means(keyed: bool) -> String {
     if keyed {
         format!(
-            "{LABEL} rejected the API key (HTTP 401). Check the key, or drop it and \
-             --api-key/--api-key-file to fall back to the free tier."
+            "{LABEL} rejected the API key (HTTP 401). Check the key, or drop \
+             --api-key/--api-key-file to try an anonymous request."
         )
     } else {
         format!(
-            "{LABEL} refused an anonymous request (HTTP 401). Its API is documented as \
-             needing no key, so this usually means it now wants one, or that it is \
-             refusing this address. Ask developers@song.link for a key, then set \
-             {KEY_VARIABLE} or pass --api-key."
+            "{LABEL} no longer answers anonymous requests: access to its public \
+             v1-alpha.1 API has been withdrawn, and a key is now required. Ask \
+             developers@song.link for one, then set {KEY_VARIABLE} or pass --api-key. \
+             That namespace is deprecated outright, so a key may not buy long."
         )
     }
 }
