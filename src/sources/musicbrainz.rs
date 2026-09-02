@@ -1,11 +1,11 @@
 //! MusicBrainz as a copyright source.
 //!
-//! MusicBrainz stores no copyright *string*. What it stores is the
-//! relationship between a release and the label that holds the copyright:
-//! `phonographic copyright` for the ℗ line and `copyright` for the © one, each
-//! with the year it began. The line written to `TCOP` is built from those
-//! parts, which is why a message from here can read slightly differently from
-//! the same album's message on a store.
+//! MusicBrainz stores copyright mainly as relationships from a release to the
+//! label or artist that holds the copyright: `phonographic copyright` for the
+//! ℗ line and `copyright` for the © one, each with the year it began. Some
+//! releases instead carry an explicit copyright line in their annotation. The
+//! line written to `TCOP` is built from a structured relationship when one is
+//! present, and otherwise an explicit annotation line is used.
 //!
 //! The API needs no account. It does ask for two things in return: a User-Agent
 //! that identifies the application and a way to reach whoever runs it, and no
@@ -69,6 +69,7 @@ struct ArtistCredit {
 #[derive(Debug, Deserialize)]
 struct Release {
     date: Option<String>,
+    annotation: Option<String>,
     #[serde(default)]
     relations: Vec<Relation>,
 }
@@ -79,10 +80,16 @@ struct Relation {
     kind: Option<String>,
     begin: Option<String>,
     label: Option<Label>,
+    artist: Option<Artist>,
 }
 
 #[derive(Debug, Deserialize)]
 struct Label {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Artist {
     name: Option<String>,
 }
 
@@ -333,9 +340,14 @@ impl Client {
         // the first few matches are opened until one of them has a copyright.
         for release in candidates {
             let url = format!("{releases}/{}", release.id);
-            let Some(release): Option<Release> =
-                self.http
-                    .get_json(&url, &[("inc", "label-rels"), ("fmt", "json")], &[])?
+            let Some(release): Option<Release> = self.http.get_json(
+                &url,
+                &[
+                    ("inc", "label-rels+artist-rels+annotation"),
+                    ("fmt", "json"),
+                ],
+                &[],
+            )?
             else {
                 continue;
             };
@@ -383,7 +395,8 @@ fn rank(release: &ReleaseStub, wanted: &AlbumEvidence) -> Option<Score> {
 /// The copyright line for a release, preferring ℗ over ©.
 ///
 /// `TCOP` is the recording's copyright, so the phonographic line is the right
-/// one; the © line is only used when a release records nothing else.
+/// one; the © line is only used when a release records nothing else. A release
+/// annotation is considered only after structured relationships have no answer.
 fn copyright_of(release: &Release) -> Option<String> {
     for (kind, symbol) in [
         ("phonographic copyright", '\u{2117}'),
@@ -394,7 +407,7 @@ fn copyright_of(release: &Release) -> Option<String> {
             .iter()
             .filter(|relation| relation.kind.as_deref() == Some(kind))
             .find_map(|relation| {
-                let owner = relation.label.as_ref()?.name.as_deref()?;
+                let owner = relation_owner(relation)?;
                 let year =
                     year_of(relation.begin.as_deref()).or_else(|| year_of(release.date.as_deref()));
                 copyright_line(symbol, year.as_deref(), owner)
@@ -403,7 +416,46 @@ fn copyright_of(release: &Release) -> Option<String> {
             return line;
         }
     }
-    None
+    annotation_copyright(release.annotation.as_deref())
+}
+
+fn relation_owner(relation: &Relation) -> Option<&str> {
+    relation
+        .label
+        .as_ref()
+        .and_then(|label| label.name.as_deref())
+        .or_else(|| {
+            relation
+                .artist
+                .as_ref()
+                .and_then(|artist| artist.name.as_deref())
+        })
+}
+
+/// Accept only annotation text that explicitly declares itself to be a
+/// copyright line. An annotation is otherwise free-form prose, so guessing an
+/// owner from arbitrary text would be much less reliable than returning none.
+fn annotation_copyright(annotation: Option<&str>) -> Option<String> {
+    annotation?.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with(['\u{2117}', '\u{a9}']) {
+            return Some(line.to_owned());
+        }
+
+        let lower = line.to_lowercase();
+        for (prefix, symbol) in [
+            ("phonographic copyright:", '\u{2117}'),
+            ("copyright:", '\u{a9}'),
+        ] {
+            if lower.starts_with(prefix) {
+                let rest = line[prefix.len()..].trim();
+                if !rest.is_empty() {
+                    return Some(format!("{symbol} {rest}"));
+                }
+            }
+        }
+        None
+    })
 }
 
 /// The closest recording to what the tag says, or `None` when none match.
@@ -519,6 +571,52 @@ mod tests {
     }
 
     #[test]
+    fn builds_the_line_from_an_artist_relationship_too() {
+        let artist_owned = release(
+            r#"{
+                "date":"2026-01-01",
+                "relations":[{
+                    "type":"phonographic copyright",
+                    "begin":"2026",
+                    "artist":{"name":"Independent Artist"}
+                }]
+            }"#,
+        );
+        assert_eq!(
+            copyright_of(&artist_owned).as_deref(),
+            Some("\u{2117} 2026 Independent Artist")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_an_explicit_annotation_line() {
+        let annotated = release(
+            r#"{
+                "date":"2026",
+                "annotation":"Imported notes\n℗ 2026 SM Entertainment, under exclusive license to UNIVERSAL MUSIC LLC\nOther prose"
+            }"#,
+        );
+        assert_eq!(
+            copyright_of(&annotated).as_deref(),
+            Some("\u{2117} 2026 SM Entertainment, under exclusive license to UNIVERSAL MUSIC LLC")
+        );
+
+        let labelled = release(r#"{"annotation":"Copyright: 2026 Example Rights Ltd."}"#);
+        assert_eq!(
+            copyright_of(&labelled).as_deref(),
+            Some("\u{a9} 2026 Example Rights Ltd.")
+        );
+    }
+
+    #[test]
+    fn arbitrary_annotation_prose_is_not_guessed_as_copyright() {
+        let annotated = release(
+            r#"{"annotation":"Released by Example Records. Licensed in several territories."}"#,
+        );
+        assert_eq!(copyright_of(&annotated), None);
+    }
+
+    #[test]
     fn falls_back_to_the_copyright_relationship_and_the_release_date() {
         let only_copyright = release(
             r#"{
@@ -541,7 +639,6 @@ mod tests {
         );
         assert_eq!(copyright_of(&unrelated), None);
         assert_eq!(copyright_of(&release(r#"{"date":"2001"}"#)), None);
-        // A relationship to no label at all cannot name an owner.
         let unnamed = release(r#"{"relations":[{"type":"copyright","label":{}}]}"#);
         assert_eq!(copyright_of(&unnamed), None);
     }
@@ -572,8 +669,6 @@ mod tests {
         assert_eq!(quote_for_lucene(r#"He said "hi"\"#), "\"He said hi\"");
     }
 
-    /// The search, then each matching release in turn until one of them names
-    /// a copyright holder. The release that is not a match is never opened.
     #[test]
     fn searches_then_opens_matching_releases_until_one_answers() {
         let server = Server::answering(&[
@@ -599,13 +694,12 @@ mod tests {
             asked,
             [
                 "/?query=artist%3A%22Daft+Punk%22+AND+release%3A%22Discovery%22&limit=10&fmt=json",
-                "/bare?inc=label-rels&fmt=json",
-                "/credited?inc=label-rels&fmt=json",
+                "/bare?inc=label-rels%2Bartist-rels%2Bannotation&fmt=json",
+                "/credited?inc=label-rels%2Bartist-rels%2Bannotation&fmt=json",
             ]
         );
     }
 
-    /// A second track from the same album must not cost a second request.
     #[test]
     fn an_album_is_only_looked_up_once() {
         let server = Server::answering(&[r#"{"releases":[]}"#]);
@@ -638,8 +732,6 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
-    /// MusicBrainz indexes releases by the ISRCs they carry, so the exact
-    /// identifier replaces the name search rather than adding a request.
     #[test]
     fn an_isrc_is_searched_for_before_a_name() {
         let server = Server::answering(&[
@@ -662,7 +754,10 @@ mod tests {
             asked[0].target,
             "/?query=isrc%3A%22GBUM71029604%22&limit=10&fmt=json"
         );
-        assert_eq!(asked[1].target, "/right?inc=label-rels&fmt=json");
+        assert_eq!(
+            asked[1].target,
+            "/right?inc=label-rels%2Bartist-rels%2Bannotation&fmt=json"
+        );
     }
 
     #[test]
@@ -686,8 +781,6 @@ mod tests {
         assert!(asked[1].target.contains("artist"), "{}", asked[1].target);
     }
 
-    /// Only three releases are ever opened, so the evidence decides which
-    /// three: MusicBrainz lists a release per pressing.
     #[test]
     fn the_track_count_puts_the_right_pressing_first() {
         let server = Server::answering(&[
@@ -706,10 +799,11 @@ mod tests {
         wanted.total_tracks = Some(14);
 
         assert!(client.copyright(&wanted).unwrap().is_some());
-        // The fourteen-track pressing is opened first and answers, so the
-        // twenty-track one is never fetched at all.
         let asked = server.requests();
-        assert_eq!(asked[1].target, "/original?inc=label-rels&fmt=json");
+        assert_eq!(
+            asked[1].target,
+            "/original?inc=label-rels%2Bartist-rels%2Bannotation&fmt=json"
+        );
         assert_eq!(asked.len(), 2);
     }
 
@@ -719,10 +813,6 @@ mod tests {
         evidence
     }
 
-    /// A compilation credits the release to "Various Artists" while the
-    /// recording is credited to whoever played it. Searching by the album
-    /// artist finds nothing and filters every candidate out, which is how a
-    /// whole compilation ends up with no ISRC and no explanation.
     #[test]
     fn a_recording_is_looked_up_by_its_performer_not_the_album_artist() {
         let server = Server::answering(&[
@@ -750,8 +840,6 @@ mod tests {
         );
     }
 
-    /// Without a separate track artist the album artist is still all there is,
-    /// so the ordinary single-artist album keeps working exactly as before.
     #[test]
     fn the_album_artist_is_used_when_the_tag_names_no_performer() {
         let server = Server::answering(&[
@@ -769,9 +857,6 @@ mod tests {
         assert_eq!(found.isrc.as_deref(), Some("GBUM71029604"));
     }
 
-    /// The language comes from the work -- the song as written -- reached
-    /// through the recording, because a release's own language describes the
-    /// text on its track list rather than what is sung.
     #[test]
     fn the_language_comes_from_the_works_of_the_recording() {
         let server = Server::answering(&[
@@ -813,8 +898,6 @@ mod tests {
         );
     }
 
-    /// An ISRC names the recording outright, so it replaces the fuzzy search
-    /// rather than adding to it.
     #[test]
     fn an_isrc_names_the_recording_outright() {
         let server = Server::answering(&[
@@ -835,11 +918,8 @@ mod tests {
         );
     }
 
-    /// Work data is patchy. Every ordinary gap has to come back as "no
-    /// answer", so the caller can fall back to reading the lyrics.
     #[test]
     fn every_gap_in_the_data_is_simply_no_answer() {
-        // No recording found.
         let server = Server::answering(&[r#"{"recordings":[]}"#]);
         let mut client = Client::pointing_at(&server.address);
         assert_eq!(
@@ -850,7 +930,6 @@ mod tests {
         );
         server.requests();
 
-        // A recording with no work linked to it, which is the common case.
         let server = Server::answering(&[
             r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
             r#"{"isrcs":[],"relations":[]}"#,
@@ -864,7 +943,6 @@ mod tests {
         );
         server.requests();
 
-        // A work with no language recorded on it.
         let server = Server::answering(&[
             r#"{"recordings":[{"id":"a","title":"One More Time","artist-credit":[{"name":"Daft Punk"}]}]}"#,
             r#"{"isrcs":[],"relations":[{"work":{}}]}"#,
@@ -879,8 +957,6 @@ mod tests {
         server.requests();
     }
 
-    /// A tag with no title has nothing to search a recording by, and must not
-    /// spend a request finding that out.
     #[test]
     fn a_track_with_no_title_is_not_searched_for() {
         let server = Server::answering(&[]);
@@ -894,8 +970,6 @@ mod tests {
         assert!(server.requests().is_empty());
     }
 
-    /// Language belongs to the song, so it is cached per track rather than per
-    /// album -- but asking twice for the same track still costs one lookup.
     #[test]
     fn a_track_is_only_looked_up_once() {
         let server = Server::answering(&[
@@ -911,8 +985,6 @@ mod tests {
         assert_eq!(server.requests().len(), 2);
     }
 
-    /// A search for a common title can return anybody's song of that name, so
-    /// the artist still has to agree.
     #[test]
     fn a_recording_by_the_wrong_artist_is_refused() {
         let server = Server::answering(&[r#"{"recordings":[
