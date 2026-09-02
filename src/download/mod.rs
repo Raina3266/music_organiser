@@ -26,6 +26,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_TOKEN_REPLACEMENTS: u32 = 3;
 const MAX_TOKEN_PROMPTS: u32 = 3;
 
+struct MetadataLookups<'a> {
+    itunes: Option<&'a mut ItunesClient>,
+    musicbrainz: Option<&'a mut MusicBrainzClient>,
+    discogs: Option<&'a mut DiscogsClient>,
+    deezer: Option<&'a mut DeezerClient>,
+}
+
 /// Download every unique line in `config.input` through spotDL, then rewrite
 /// each file's ID3v2.3 tag: retain the requested 15 metadata types, store the
 /// copyright, and paste cleaned `.lrc` text into the ordinary USLT frame.
@@ -164,10 +171,12 @@ pub fn run(mut config: Config) -> Result<i32, String> {
                         &config,
                         entry,
                         &before,
-                        itunes.as_mut(),
-                        musicbrainz.as_mut(),
-                        discogs.as_mut(),
-                        deezer.as_mut(),
+                        MetadataLookups {
+                            itunes: itunes.as_mut(),
+                            musicbrainz: musicbrainz.as_mut(),
+                            discogs: discogs.as_mut(),
+                            deezer: deezer.as_mut(),
+                        },
                         &mut metadata_totals,
                     )
                 } else {
@@ -278,12 +287,16 @@ fn apply_metadata(
     config: &Config,
     entry: &Entry,
     before: &MusicSnapshot,
-    mut itunes: Option<&mut ItunesClient>,
-    mut musicbrainz: Option<&mut MusicBrainzClient>,
-    mut discogs: Option<&mut DiscogsClient>,
-    mut deezer: Option<&mut DeezerClient>,
+    lookups: MetadataLookups<'_>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
+    let MetadataLookups {
+        mut itunes,
+        mut musicbrainz,
+        mut discogs,
+        mut deezer,
+    } = lookups;
+
     let files = match downloaded_files(config, entry, before) {
         Ok(files) => files,
         Err(error) => {
