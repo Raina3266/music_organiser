@@ -123,9 +123,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         if discogs.is_some() {
             println!("Discogs will be used as a final copyright fallback.");
         } else {
-            println!(
-                "Discogs copyright fallback is unavailable; set DISCOGS_TOKEN to enable it."
-            );
+            println!("Discogs copyright fallback is unavailable; set DISCOGS_TOKEN to enable it.");
         }
     }
 
