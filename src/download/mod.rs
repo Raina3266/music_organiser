@@ -13,8 +13,8 @@ use crate::CopyrightLookup;
 use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
 use crate::sources::{
-    Limits, deezer::Client as DeezerClient, itunes::Client as ItunesClient,
-    musicbrainz::Client as MusicBrainzClient,
+    Limits, deezer::Client as DeezerClient, discogs::Client as DiscogsClient,
+    itunes::Client as ItunesClient, musicbrainz::Client as MusicBrainzClient,
 };
 use std::env;
 use std::fs;
@@ -73,8 +73,6 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     let interactive = !config.non_interactive && io::stdin().is_terminal();
     let mut auth_token = startup_token(&mut config, interactive)?;
 
-    // Only a token-free run can be silently turned into an official one by
-    // spotDL's own config, so this check waits until the mode is settled.
     if !config.official_api
         && let Some(risk) = spotdl::official_config_risk()?
     {
@@ -112,8 +110,25 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         env::var("MUSICBRAINZ_CONTACT").ok().as_deref(),
         Limits::default(),
     )?);
-    // Asked only when MusicBrainz has no ISRC, so it costs nothing on the
-    // tracks that catalogue already knows.
+    let mut discogs = if config.no_copyright {
+        None
+    } else {
+        env::var("DISCOGS_TOKEN")
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .map(|token| DiscogsClient::new(&token, Limits::default()))
+            .transpose()?
+    };
+    if !config.no_copyright {
+        if discogs.is_some() {
+            println!("Discogs will be used as a final copyright fallback.");
+        } else {
+            println!(
+                "Discogs copyright fallback is unavailable; set DISCOGS_TOKEN to enable it."
+            );
+        }
+    }
+
     let mut deezer = Some(DeezerClient::new(Limits::default())?);
     if config.no_language_lookup {
         println!(
@@ -133,9 +148,6 @@ pub fn run(mut config: Config) -> Result<i32, String> {
 
     for (index, entry) in input.entries.iter().enumerate() {
         println!("\n[{}/{}] Downloading {}", index + 1, total, entry.query);
-        // The snapshot is what tells this run apart from everything already in
-        // the output directory, so a line that names no single Spotify track
-        // still finds the files it just produced.
         let outcome = match files::snapshot_music_files(&config.output) {
             Err(error) => EntryOutcome::Abort(format!(
                 "cannot scan {} before downloading: {error}",
@@ -156,6 +168,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
                         &before,
                         itunes.as_mut(),
                         musicbrainz.as_mut(),
+                        discogs.as_mut(),
                         deezer.as_mut(),
                         &mut metadata_totals,
                     )
@@ -263,17 +276,13 @@ pub fn run(mut config: Config) -> Result<i32, String> {
     })
 }
 
-/// Rewrite the tag of every file spotDL just wrote for this entry.
-///
-/// The copyright lookup searches iTunes with the album artist and album spotDL
-/// recorded in the tag. A file that cannot be finished is reported as a failure
-/// so its line lands in the retry list, and its `.lrc` sidecar is left on disk.
 fn apply_metadata(
     config: &Config,
     entry: &Entry,
     before: &MusicSnapshot,
     mut itunes: Option<&mut ItunesClient>,
     mut musicbrainz: Option<&mut MusicBrainzClient>,
+    mut discogs: Option<&mut DiscogsClient>,
     mut deezer: Option<&mut DeezerClient>,
     totals: &mut MetadataReport,
 ) -> EntryOutcome {
@@ -298,9 +307,6 @@ fn apply_metadata(
     for file in &files {
         let mut evidence = metadata::evidence_of(file);
 
-        // One MusicBrainz recording lookup supplies both the ISRC that a
-        // token-free Spotify session lacks and the work language. Either can
-        // be absent without preventing the rest of the tag rewrite.
         let track_metadata = match (musicbrainz.as_deref_mut(), evidence.as_ref()) {
             (Some(client), Some(track)) => {
                 match client.track_metadata(track, !config.no_language_lookup) {
@@ -318,9 +324,6 @@ fn apply_metadata(
             .is_none()
             .then_some(track_metadata.isrc)
             .flatten();
-        // MusicBrainz is a volunteer catalogue, so a track nobody has entered
-        // is simply absent from it. Deezer is asked next because it misses a
-        // different set of tracks, and only when there is still nothing.
         if existing_isrc.is_none()
             && looked_up_isrc.is_none()
             && let (Some(client), Some(track)) = (deezer.as_deref_mut(), evidence.as_ref())
@@ -337,9 +340,6 @@ fn apply_metadata(
             track.isrc.clone_from(&isrc);
         }
 
-        // iTunes generally has the catalogue's ready-made copyright line.
-        // A miss or failure falls through to MusicBrainz, which constructs the
-        // line from the release's copyright relationships.
         let mut source_failed = false;
         let mut copyright = if config.no_copyright {
             None
@@ -368,6 +368,18 @@ fn apply_metadata(
                 }
             }
         }
+        if copyright.is_none()
+            && !config.no_copyright
+            && let (Some(client), Some(track)) = (discogs.as_deref_mut(), evidence.as_ref())
+        {
+            match client.copyright(track) {
+                Ok(answer) => copyright = answer,
+                Err(error) => {
+                    eprintln!("Copyright (Discogs): {error}");
+                    source_failed = true;
+                }
+            }
+        }
         if copyright.is_none() && source_failed {
             lookups_failed += 1;
         }
@@ -382,10 +394,6 @@ fn apply_metadata(
             language.as_ref(),
             &config.language,
         ));
-        // The track ID is only there to tie a file back to the line that asked
-        // for it, which is done by now. A file whose tag could not be finished
-        // is renamed too, so a retry of that line replaces it instead of
-        // leaving both names behind.
         match files::drop_track_id_suffix(file) {
             Ok(Some(rename)) => {
                 report.files_renamed += 1;
@@ -398,7 +406,6 @@ fn apply_metadata(
                 }
             }
             Ok(None) => {}
-            // The audio and its tag are finished; only the name is untidy.
             Err(error) => eprintln!(
                 "Name: cannot drop the track ID from {}: {error}",
                 file.display()
@@ -447,13 +454,6 @@ fn apply_metadata(
     outcome
 }
 
-/// The audio spotDL just wrote for one entry.
-///
-/// Comparing the output directory against the snapshot taken before the
-/// download covers every line form, including an album or playlist that
-/// expanded into many songs. spotDL's `[{track-id}]` file name is only a
-/// fallback for a line that names a single track, in case the comparison
-/// missed a rewrite of a file that was already there.
 fn downloaded_files(
     config: &Config,
     entry: &Entry,
@@ -469,9 +469,6 @@ fn downloaded_files(
     }
 }
 
-/// Resolve an optional token. An interactive run with no explicit mode asks
-/// the user; scripts default to token-free unless a token or official mode was
-/// configured.
 fn startup_token(config: &mut Config, interactive: bool) -> Result<Option<String>, String> {
     if config.token_free {
         return Ok(None);
@@ -484,7 +481,6 @@ fn startup_token(config: &mut Config, interactive: bool) -> Result<Option<String
     Ok(adopt_token(config, token))
 }
 
-/// Fold an optional configured token into the run's mode.
 fn adopt_token(config: &mut Config, token: Option<String>) -> Option<String> {
     if token.is_some() {
         config.official_api = true;
