@@ -252,7 +252,8 @@ OPTIONS:
         --token-file <FILE>           Read a Spotify access token from a file
         --non-interactive             Never prompt for Spotify mode, Deno, or a token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
-        --no-copyright                Skip iTunes and MusicBrainz copyright lookups
+        --no-copyright                Skip the iTunes, MusicBrainz and Discogs
+                                      copyright lookups
         --no-language-lookup          Skip the MusicBrainz language lookup and read the
                                       lyrics instead
         --language <LANGUAGE>         Fallback language, by name or code [default: English]
@@ -313,7 +314,8 @@ METADATA:
     are removed too.
 
         TCOP   the copyright message, looked up on iTunes first and then
-               MusicBrainz; neither needs an account, key, or token
+               MusicBrainz; neither needs an account, key, or token.
+               Discogs is asked last, and only when DISCOGS_TOKEN is set
         TLAN   the language as a readable name - English, Chinese,
                Korean - detected from the lyric text with its timestamps
                stripped, falling back to --language when the lyrics do not
@@ -323,7 +325,7 @@ METADATA:
         TSRC   spotDL's value, or a MusicBrainz recording lookup when missing
 
     A copyright is stored only when a catalogue album matches the evidence in
-    the tag. Use --no-copyright to skip both copyright sources.
+    the tag. Use --no-copyright to skip all three copyright sources.
 
 SYNCED LYRICS:
     Every download asks spotDL for time-synced lyrics and for the .lrc file

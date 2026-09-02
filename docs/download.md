@@ -82,7 +82,8 @@ stops before starting spotDL.
 | `--token-file <FILE>` | Read a token from a file and automatically select official mode |
 | `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-copyright` | Skip both iTunes and MusicBrainz copyright lookups |
+| `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
+| `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
@@ -182,8 +183,9 @@ deleted. A tag on this list is kept when the source provides it. When a
 token-free download has no `TSRC`, MusicBrainz is searched by recording title
 and track artist and its ISRC is written when found; [Deezer](#isrc) is asked
 next when MusicBrainz has none. A run says how many files ended with no ISRC at
-all, since a silently missing frame looks the same as a lookup that never ran. `TCOP` and `TLAN` are also
-filled by this program, and the cleaned synced lyrics are written to `USLT`.
+all, since a silently missing frame looks the same as a lookup that never ran.
+`TCOP` and `TLAN` are also filled by this program, and the cleaned synced
+lyrics are written to `USLT`.
 
 ### Copyright
 
@@ -192,6 +194,18 @@ API](https://performance-partners.apple.com/search-api) first. When iTunes has
 no confident match or fails, MusicBrainz is tried next and constructs a line
 from the release's phonographic-copyright or copyright label relationship.
 Neither source needs an account, key, or token.
+
+Discogs is asked third, and only when `DISCOGS_TOKEN` names a personal access
+token; without one the run says so at startup and stops after MusicBrainz. It
+is last because it needs that token and because its copyright lines are
+community-entered, so it is the widest net rather than the most consistent
+wording — worth having for the releases the other two do not list at all.
+
+| Source | Asked | Needs |
+|---|---|---|
+| iTunes | Always | Nothing |
+| MusicBrainz | When iTunes has no confident match | Nothing; `MUSICBRAINZ_CONTACT` is polite |
+| Discogs | When neither of the first two answered | `DISCOGS_TOKEN` |
 
 Lookups are by album rather than by track, because the copyright belongs to the
 album and because the downloads are already grouped that way. The album artist
@@ -205,10 +219,10 @@ ignores case and punctuation and allows one name to extend the other, so
 (Deluxe Edition)`. Anything less similar is treated as a different release and
 the frame is left alone.
 
-If both lookups fail outright — API throttling or no network — that is reported
-as a warning and **the rest of the tag is still written**. The rating still
-goes, the lyrics are still embedded, and only `TCOP` is left untouched.
-`--no-copyright` skips both sources altogether.
+If every lookup fails outright — API throttling or no network — that is
+reported as a warning and **the rest of the tag is still written**. The rating
+still goes, the lyrics are still embedded, and only `TCOP` is left untouched.
+`--no-copyright` skips all three sources altogether.
 
 Two things to know about the API: it is throttled per IP, so requests are
 spaced out and a throttled response is retried a few times before giving up;
@@ -241,7 +255,7 @@ Only the ISRC is taken from Deezer. It publishes no copyright line at all — it
 album object carries a `label`, which is the marketing imprint rather than the
 phonographic copyright holder, and the two are routinely different companies.
 Assembling a `℗` line from it would read right and name the wrong entity, so
-`TCOP` is left to iTunes and MusicBrainz.
+`TCOP` is left to iTunes, MusicBrainz, and Discogs.
 
 ### Language
 

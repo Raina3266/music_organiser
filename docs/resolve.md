@@ -87,11 +87,12 @@ read out of the process list.
 
 ## Rate limits and how long a run takes
 
-Odesli allows ten requests a minute without a key, so `resolve` spaces its
-requests six seconds apart and says up front how long the file will take. A
-hundred tracks is ten minutes. With a key it starts at two requests a second
+Anonymous access has been withdrawn, so a run without a key is refused at its
+first request rather than merely slowed: every line is copied through bare and
+`resolve` reports the failure. With a key it starts at two requests a second
 and lets the throttling correct it: a `429` widens the spacing, and it eases
-back once requests are getting through again.
+back once requests are getting through again. A keyed run says up front how
+long the file will take.
 
 Each distinct track is asked about once however often the file repeats it, and
 a run can be repeated cheaply — re-resolving an already-resolved file only asks

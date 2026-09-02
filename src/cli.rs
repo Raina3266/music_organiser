@@ -72,8 +72,9 @@ The resolve command reads the same kind of file and writes another one, asking
 Odesli (song.link) which YouTube Music track each bare Spotify track is. A
 track it can place becomes an exact-source pair, so spotDL downloads that
 recording instead of searching for one; a track it cannot place is left alone.
-The free tier allows ten requests a minute, so ODESLI_API_KEY, --api-key, or
---api-key-file is worth having for a long file.
+Odesli has withdrawn anonymous access, so a key -- from ODESLI_API_KEY,
+--api-key, or --api-key-file -- is now required; without one the run stops at
+the first track and leaves every line bare for spotDL to search as before.
 
 Downloads are token-free by default. Supplying --auth-token, --token-file, or
 SPOTIFY_AUTH_TOKEN automatically enables Spotify's official API; no separate

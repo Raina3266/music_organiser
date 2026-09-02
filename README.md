@@ -76,6 +76,8 @@ Every line is downloaded as MP3 with synchronised lyrics, and each ID3v2.3 tag
 is limited to the 15 supported metadata types. No credentials are needed:
 copyright comes from iTunes with a MusicBrainz fallback, and a missing ISRC
 from MusicBrainz with a Deezer fallback. All three are open without an account.
+Setting `DISCOGS_TOKEN` adds Discogs as a last copyright fallback, for the
+albums neither iTunes nor MusicBrainz knows.
 
 ## Usage
 
@@ -108,12 +110,15 @@ metadata whitelist, lyric handling, and the Spotify token modes.
 | `--token-file <FILE>` | Read a token from a file, selecting official mode |
 | `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
-| `--no-copyright` | Skip the iTunes and MusicBrainz copyright lookups |
+| `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
+| `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 
 `SPOTDL_PROGRAM` chooses a spotDL executable without repeating `--spotdl`.
+`DISCOGS_TOKEN` enables the Discogs copyright fallback, and
+`MUSICBRAINZ_CONTACT` identifies the run to MusicBrainz.
 
 ### resolve
 
@@ -146,14 +151,13 @@ https://open.spotify.com/track/02Q0SXOsk74oV4hesiL6JW|https://music.youtube.com/
 
 Odesli has withdrawn anonymous access to this API, so without a key the run
 stops at the first track and leaves every line bare; `download` still handles
-those, since spotDL searches for them as before. See
-[docs/resolve.md](docs/resolve.md).
+those, since spotDL searches for them as before.
 
 Albums, playlists, YouTube links, and tracks Odesli cannot place are all copied
 through unchanged, so the output is always a drop-in replacement for the input;
 a pair the input already carried is copied through in that same Spotify-first
-order. Without a key Odesli allows ten requests a minute, so a hundred tracks
-takes ten minutes. See [docs/resolve.md](docs/resolve.md).
+order. With a key the run starts at two requests a second and lets Odesli's
+throttling correct it. See [docs/resolve.md](docs/resolve.md).
 
 ### delete
 

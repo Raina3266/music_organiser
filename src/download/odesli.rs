@@ -45,9 +45,11 @@ const KEY_VARIABLE: &str = super::resolve::KEY_VARIABLE;
 
 /// Gap between requests without an API key.
 ///
-/// Odesli publishes ten requests per minute for anonymous callers, so this is
-/// that rate exactly. It is slow — a hundred tracks take ten minutes — which
-/// is the price of the free tier, and the reason a key is worth having.
+/// The ten-per-minute anonymous tier this paces to has been withdrawn, so an
+/// unkeyed run is now refused at its first request and never reaches the
+/// second. The spacing is kept because the refusal is the server's to give:
+/// should anonymous access return, this asks at the published rate rather
+/// than at one that would earn a ban.
 const FREE_INTERVAL: Duration = Duration::from_secs(6);
 /// Gap between requests once a key is supplied.
 ///

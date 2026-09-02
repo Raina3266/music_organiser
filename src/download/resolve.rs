@@ -200,21 +200,26 @@ fn api_key(config: &Config) -> Result<Option<String>, String> {
     }
 }
 
-/// Say up front how long this will take, because on the free tier it is long
-/// enough that a silent run looks like a hung one.
+/// Say up front how long this will take, because a keyed run over a long file
+/// is slow enough that a silent one looks hung. An unkeyed run is not slow but
+/// doomed, and promising it a finishing time would be the wrong warning.
 fn announce(tracks: usize, interval: Duration, keyed: bool) {
     if tracks == 0 {
         println!("No bare Spotify track to resolve; every line will be copied through.");
         return;
     }
+    if !keyed {
+        println!(
+            "Resolving {tracks} Spotify track(s) through {}, which no longer answers \
+             without an API key; expect the first request to be refused and every \
+             line to stay bare.",
+            odesli::LABEL,
+        );
+        return;
+    }
     let seconds = interval.as_secs_f64() * tracks as f64;
-    let rate = if keyed {
-        "with an API key"
-    } else {
-        "on the free tier, at ten requests a minute"
-    };
     println!(
-        "Resolving {tracks} Spotify track(s) through {} {rate}; about {}.",
+        "Resolving {tracks} Spotify track(s) through {} with an API key; about {}.",
         odesli::LABEL,
         crate::sources::http::readable(seconds.ceil() as u64),
     );
