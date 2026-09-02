@@ -16,7 +16,7 @@ use crate::AlbumEvidence;
 use crate::sources::{
     Limits,
     http::Http,
-    naming::{Score, confidence},
+    naming::{Confidence, Score, confidence},
 };
 use crate::{CopyrightLookup, LookupError};
 
@@ -26,8 +26,10 @@ const SEARCH_URL: &str = "https://itunes.apple.com/search";
 /// Storefront to search. The `℗` line is the label's and rarely differs
 /// between storefronts, and the US catalogue is the most complete.
 const COUNTRY: &str = "US";
-/// The API is throttled per IP, so requests are spaced out a little.
-const MIN_INTERVAL: Duration = Duration::from_millis(200);
+/// Apple's legacy Search API documents roughly twenty calls a minute. Three
+/// seconds keeps a library scan inside that limit instead of immediately
+/// relying on 403/429 backoff to discover it.
+const MIN_INTERVAL: Duration = Duration::from_secs(3);
 /// How many candidates to weigh before giving up on a confident match.
 const RESULT_LIMIT: u8 = 10;
 
@@ -131,13 +133,39 @@ fn best_match(results: &[AlbumResult], wanted: &AlbumEvidence) -> Option<String>
 /// How well a result matches everything the tag knows.
 fn rank(result: &AlbumResult, wanted: &AlbumEvidence) -> Option<Score> {
     Some(Score::new(
-        confidence(result.collection_name.as_deref(), &wanted.album)?,
+        itunes_release_confidence(result.collection_name.as_deref(), &wanted.album)?,
         confidence(result.artist_name.as_deref(), &wanted.artist)?,
         result.track_count,
         wanted.total_tracks,
         result.release_date.as_deref(),
         wanted.year.as_deref(),
     ))
+}
+
+/// Apple decorates collection names with a media kind that spotDL/Spotify
+/// commonly omit, notably ` - Single` and ` - EP`. Those suffixes identify how
+/// Apple sells the same release; they are not edition names and should not be
+/// added to the shared matcher, where a literal album title ending in "Single"
+/// could otherwise become a false positive.
+fn itunes_release_confidence(candidate: Option<&str>, expected: &str) -> Option<Confidence> {
+    let candidate = candidate?;
+    confidence(Some(candidate), expected).or_else(|| {
+        let stripped = strip_apple_media_kind(candidate);
+        (stripped != candidate)
+            .then(|| confidence(Some(stripped), expected))
+            .flatten()
+    })
+}
+
+fn strip_apple_media_kind(value: &str) -> &str {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    for suffix in [" - single", " - ep"] {
+        if lower.ends_with(suffix) {
+            return trimmed[..trimmed.len() - suffix.len()].trim_end();
+        }
+    }
+    trimmed
 }
 
 #[cfg(test)]
@@ -225,6 +253,51 @@ mod tests {
         // An album whose name normalizes to nothing cannot be matched safely.
         assert_eq!(
             best_match(&punctuated, &wanting("Sigur R\u{f3}s", "( )")),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_apples_single_and_ep_catalogue_suffixes() {
+        let single = results(
+            r#"{"results":[{
+                "artistName":"Hearts2Hearts",
+                "collectionName":"RUDE! - Single",
+                "copyright":"℗ 2026 SM Entertainment"
+            }]}"#,
+        );
+        assert_eq!(
+            best_match(&single, &wanting("Hearts2Hearts", "RUDE!")),
+            Some("\u{2117} 2026 SM Entertainment".to_owned())
+        );
+
+        let ep = results(
+            r#"{"results":[{
+                "artistName":"Hearts2Hearts",
+                "collectionName":"FOCUS - The 1st Mini Album - EP",
+                "copyright":"℗ 2025 SM Entertainment"
+            }]}"#,
+        );
+        assert_eq!(
+            best_match(
+                &ep,
+                &wanting("Hearts2Hearts", "FOCUS - The 1st Mini Album")
+            ),
+            Some("\u{2117} 2025 SM Entertainment".to_owned())
+        );
+    }
+
+    #[test]
+    fn does_not_treat_single_as_a_global_edition_word() {
+        let different = results(
+            r#"{"results":[{
+                "artistName":"Example Artist",
+                "collectionName":"Single",
+                "copyright":"℗ 2026 Wrong"
+            }]}"#,
+        );
+        assert_eq!(
+            best_match(&different, &wanting("Example Artist", "Single Life")),
             None
         );
     }
