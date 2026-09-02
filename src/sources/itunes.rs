@@ -217,7 +217,6 @@ mod tests {
 
     #[test]
     fn ignores_results_that_are_a_different_release() {
-        // The right album by the wrong artist must not supply a copyright.
         assert_eq!(
             best_match(&results(DISCOVERY), &wanting("Pink Floyd", "Discovery")),
             None
@@ -250,7 +249,6 @@ mod tests {
                 "copyright":"℗ 2002 Sigur Rós"
             }]}"#,
         );
-        // An album whose name normalizes to nothing cannot be matched safely.
         assert_eq!(
             best_match(&punctuated, &wanting("Sigur R\u{f3}s", "( )")),
             None
@@ -279,10 +277,7 @@ mod tests {
             }]}"#,
         );
         assert_eq!(
-            best_match(
-                &ep,
-                &wanting("Hearts2Hearts", "FOCUS - The 1st Mini Album")
-            ),
+            best_match(&ep, &wanting("Hearts2Hearts", "FOCUS - The 1st Mini Album")),
             Some("\u{2117} 2025 SM Entertainment".to_owned())
         );
     }
@@ -322,8 +317,6 @@ mod tests {
         assert!(results(r#"{"resultCount":0}"#).is_empty());
     }
 
-    /// Ranking, not order: iTunes lists the deluxe edition first here, and the
-    /// plain release is the one that was asked for.
     #[test]
     fn the_closest_release_wins_over_the_one_listed_first() {
         let listed = results(
@@ -340,8 +333,6 @@ mod tests {
         );
     }
 
-    /// The false positive that made this worth changing: a longer name is a
-    /// different record, and must not supply its copyright.
     #[test]
     fn a_longer_album_name_is_a_different_record() {
         let listed = results(
@@ -360,7 +351,6 @@ mod tests {
         );
     }
 
-    /// Spelling differences between catalogues are not differences of record.
     #[test]
     fn matches_across_ampersands_and_accents() {
         let listed = results(
@@ -375,9 +365,6 @@ mod tests {
         );
     }
 
-    /// The case that names alone cannot settle. Both releases are called
-    /// `Discovery` by Daft Punk; only the track count says which is the album
-    /// and which is the deluxe edition.
     #[test]
     fn the_track_count_separates_an_album_from_its_deluxe_edition() {
         let listed = results(
@@ -398,7 +385,6 @@ mod tests {
             Some("\u{2117} 2001 Daft Life Limited".to_owned())
         );
 
-        // Ask for twenty and the other one is right instead.
         wanted.total_tracks = Some(20);
         assert_eq!(
             best_match(&listed, &wanted),
@@ -406,8 +392,6 @@ mod tests {
         );
     }
 
-    /// Where the track count is unknown, the year still separates a reissue
-    /// from the original.
     #[test]
     fn the_year_separates_a_reissue_from_the_original() {
         let listed = results(
@@ -427,9 +411,6 @@ mod tests {
         );
     }
 
-    /// Evidence ranks candidates; it never rejects the only one there is. A
-    /// tag whose year disagrees with the sole match still gets a copyright,
-    /// because catalogues genuinely disagree about release dates.
     #[test]
     fn conflicting_evidence_still_beats_no_answer_at_all() {
         let listed = results(
