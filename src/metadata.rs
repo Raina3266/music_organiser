@@ -80,8 +80,13 @@ pub struct MetadataReport {
     /// Files whose `TLAN` language was detected from their lyrics rather than
     /// taken from the configured default.
     pub languages_detected: usize,
-    /// `.lrc` sidecars pasted into `USLT` and then deleted.
+    /// Files that ended with lyrics in `USLT`, whether they came from LRCLIB
+    /// or from a `.lrc` sidecar; a sidecar that was used is then deleted.
     pub lyrics_embedded: usize,
+    /// Files whose lyrics came from LRCLIB rather than from spotDL's sidecar.
+    /// Counted separately because it is the difference between timings checked
+    /// against the audio and timings nobody checked.
+    pub lyrics_from_lrclib: usize,
     /// Lyric lines written across all embedded files.
     pub lines_embedded: usize,
     /// `SYLT` frames removed, spotDL's own included.
@@ -107,6 +112,7 @@ impl MetadataReport {
         self.languages_detected += other.languages_detected;
         self.languages_looked_up += other.languages_looked_up;
         self.lyrics_embedded += other.lyrics_embedded;
+        self.lyrics_from_lrclib += other.lyrics_from_lrclib;
         self.lines_embedded += other.lines_embedded;
         self.sylt_frames_removed += other.sylt_frames_removed;
         self.files_renamed += other.files_renamed;
@@ -135,13 +141,19 @@ impl MetadataReport {
 /// text. `None` means nobody knew, and the lyrics are read for a guess;
 /// `default_language` is recorded when even that comes to nothing.
 ///
+/// `synced_lyrics` is timed text a catalogue matched against this recording's
+/// own length. It wins over the `.lrc` sidecar, whose search never checked the
+/// duration and so may be timed to a different cut of the song.
+///
 /// Any `.lrc` file sitting next to `audio` is pasted into the `USLT` lyrics
 /// frame and then deleted, but only after the whole tag has been read back and
-/// checked.
+/// checked. The sidecar is deleted even when its text lost, since it has been
+/// superseded rather than merely ignored.
 pub fn finalize_with_isrc(
     audio: &Path,
     copyright: Option<&str>,
     isrc: Option<&str>,
+    synced_lyrics: Option<&str>,
     known_language: Option<&Language>,
     default_language: &Language,
 ) -> MetadataReport {
@@ -160,7 +172,10 @@ pub fn finalize_with_isrc(
     };
 
     let sidecar = sibling_lyrics_file(audio);
-    let mut lyrics = None;
+    let mut lyrics = synced_lyrics
+        .map(clean_lyrics)
+        .filter(|text| !text.is_empty());
+    let from_lrclib = lyrics.is_some();
     let mut language = known_language
         .cloned()
         .unwrap_or_else(|| default_language.clone());
@@ -169,23 +184,20 @@ pub fn finalize_with_isrc(
         match fs::read(sidecar) {
             Ok(bytes) => {
                 let text = clean_lyrics(&String::from_utf8_lossy(&bytes));
+                // An unusable sidecar only sinks the file when nothing else
+                // answered; with lyrics already in hand it is just the losing
+                // candidate, and stopping here would throw the winner away.
                 if text.is_empty() {
-                    report.fail(
-                        sidecar.clone(),
-                        "the .lrc file has no lyrics after empty and timestamp-only lines are removed",
-                    );
-                    return report;
+                    if !from_lrclib {
+                        report.fail(
+                            sidecar.clone(),
+                            "the .lrc file has no lyrics after empty and timestamp-only lines are removed",
+                        );
+                        return report;
+                    }
+                } else if !from_lrclib {
+                    lyrics = Some(text);
                 }
-                // Only guess when nothing authoritative was supplied: a
-                // catalogue that names the language knows better than a
-                // detector reading two lines of a chorus.
-                if known_language.is_none()
-                    && let Some(guess) = detect_language(&lyric_lines(&text))
-                {
-                    language = guess;
-                    detected = true;
-                }
-                lyrics = Some(text);
             }
             Err(error) => {
                 report.fail(
@@ -195,6 +207,16 @@ pub fn finalize_with_isrc(
                 return report;
             }
         }
+    }
+    // Only guess when nothing authoritative was supplied: a catalogue that
+    // names the language knows better than a detector reading two lines of a
+    // chorus. Whichever text won is what gets read.
+    if known_language.is_none()
+        && let Some(text) = &lyrics
+        && let Some(guess) = detect_language(&lyric_lines(text))
+    {
+        language = guess;
+        detected = true;
     }
 
     // spotDL writes a SYLT frame of its own whenever its lyrics arrive in LRC
@@ -226,18 +248,20 @@ pub fn finalize_with_isrc(
         return report;
     }
 
-    if let (Some(sidecar), Some(lyrics)) = (&sidecar, &lyrics) {
-        if let Err(error) = fs::remove_file(sidecar) {
-            report.fail(
-                sidecar.clone(),
-                format!(
-                    "the USLT frame was verified but the .lrc file could not be deleted: {error}"
-                ),
-            );
-            return report;
-        }
+    if let Some(sidecar) = &sidecar
+        && lyrics.is_some()
+        && let Err(error) = fs::remove_file(sidecar)
+    {
+        report.fail(
+            sidecar.clone(),
+            format!("the USLT frame was verified but the .lrc file could not be deleted: {error}"),
+        );
+        return report;
+    }
+    if let Some(lyrics) = &lyrics {
         report.lyrics_embedded = 1;
         report.lines_embedded = lyric_lines(lyrics).len();
+        report.lyrics_from_lrclib = usize::from(from_lrclib);
     }
     report.sylt_frames_removed = sylt_removed;
 
@@ -263,7 +287,14 @@ pub fn finalize(
     known_language: Option<&Language>,
     default_language: &Language,
 ) -> MetadataReport {
-    finalize_with_isrc(audio, copyright, None, known_language, default_language)
+    finalize_with_isrc(
+        audio,
+        copyright,
+        None,
+        None,
+        known_language,
+        default_language,
+    )
 }
 
 /// The album artist and album name recorded in a file's tag.
@@ -579,6 +610,7 @@ mod tests {
             Some("\u{2117} 2001 Daft Life Limited"),
             None,
             None,
+            None,
             &english(),
         );
         assert_eq!(report.failures, Vec::new());
@@ -649,7 +681,7 @@ mod tests {
         let audio = directory.0.join("Solo.mp3");
         write_spotdl_style_audio(&audio);
 
-        let report = finalize_with_isrc(&audio, None, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.frames_stripped, 4);
         assert_eq!(report.lyrics_embedded, 0);
@@ -684,6 +716,7 @@ mod tests {
             Some("\u{2117} 2001 Daft Life Limited"),
             None,
             None,
+            None,
             &english(),
         );
         assert_eq!(report.failures, Vec::new());
@@ -698,6 +731,105 @@ mod tests {
     }
 
     #[test]
+    fn lyrics_matched_by_length_beat_the_sidecar() {
+        let directory = TempDir::new("lrclib-wins");
+        let audio = directory.0.join("Song.mp3");
+        let sidecar = directory.0.join("Song.lrc");
+        write_spotdl_style_audio(&audio);
+        // spotDL's own text, timed to some other cut of the song.
+        fs::write(&sidecar, "[00:99.00]the wrong take\n").unwrap();
+
+        let report = finalize_with_isrc(
+            &audio,
+            None,
+            None,
+            Some("[00:12.00]the right take\n"),
+            None,
+            &english(),
+        );
+
+        assert_eq!(report.failures, Vec::new());
+        assert_eq!(report.lyrics_embedded, 1);
+        assert_eq!(report.lyrics_from_lrclib, 1);
+        // The sidecar was superseded, so it goes the same as one that won.
+        assert!(!sidecar.exists());
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.lyrics().next().unwrap().text,
+            "[00:12.00]the right take"
+        );
+    }
+
+    #[test]
+    fn the_sidecar_is_kept_when_nothing_matched_by_length() {
+        let directory = TempDir::new("lrclib-misses");
+        let audio = directory.0.join("Song.mp3");
+        let sidecar = directory.0.join("Song.lrc");
+        write_spotdl_style_audio(&audio);
+        fs::write(&sidecar, "[00:12.00]what spotdl found\n").unwrap();
+
+        let report = finalize_with_isrc(&audio, None, None, None, None, &english());
+
+        assert_eq!(report.lyrics_embedded, 1);
+        assert_eq!(report.lyrics_from_lrclib, 0);
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(
+            tag.lyrics().next().unwrap().text,
+            "[00:12.00]what spotdl found"
+        );
+    }
+
+    #[test]
+    fn lyrics_arrive_even_when_spotdl_wrote_no_sidecar() {
+        let directory = TempDir::new("lrclib-only");
+        let audio = directory.0.join("Song.mp3");
+        write_spotdl_style_audio(&audio);
+
+        let report = finalize_with_isrc(
+            &audio,
+            None,
+            None,
+            Some("[00:05.00]words"),
+            None,
+            &english(),
+        );
+
+        assert_eq!(report.failures, Vec::new());
+        assert_eq!(report.lyrics_embedded, 1);
+        assert_eq!(report.lyrics_from_lrclib, 1);
+
+        let tag = Tag::read_from_path(&audio).unwrap();
+        assert_eq!(tag.lyrics().next().unwrap().text, "[00:05.00]words");
+    }
+
+    #[test]
+    fn an_unusable_sidecar_no_longer_sinks_a_file_that_matched() {
+        let directory = TempDir::new("lrclib-rescues");
+        let audio = directory.0.join("Song.mp3");
+        let sidecar = directory.0.join("Song.lrc");
+        write_spotdl_style_audio(&audio);
+        // Timestamp-only: nothing survives cleaning, which on its own is a
+        // failure. With lyrics already in hand it is only the losing candidate.
+        fs::write(&sidecar, "[00:01.00]\n\n").unwrap();
+
+        let report = finalize_with_isrc(
+            &audio,
+            None,
+            None,
+            Some("[00:05.00]words"),
+            None,
+            &english(),
+        );
+
+        assert_eq!(report.failures, Vec::new());
+        assert_eq!(report.files_updated, 1);
+        assert_eq!(report.lyrics_from_lrclib, 1);
+        assert!(!sidecar.exists());
+    }
+
+    #[test]
     fn an_empty_sidecar_is_kept_and_reported() {
         let directory = TempDir::new("emptylrc");
         let audio = directory.0.join("Empty.mp3");
@@ -705,7 +837,7 @@ mod tests {
         write_spotdl_style_audio(&audio);
         fs::write(&sidecar, "  \n\n").unwrap();
 
-        let report = finalize_with_isrc(&audio, None, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, None, &english());
         assert_eq!(report.failures.len(), 1);
         assert_eq!(report.files_updated, 0);
         assert!(sidecar.exists());
@@ -727,7 +859,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize_with_isrc(&audio, None, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, None, &english());
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.languages_detected, 1);
 
@@ -753,6 +885,7 @@ mod tests {
 
         let report = finalize_with_isrc(
             &audio,
+            None,
             None,
             None,
             None,
@@ -812,7 +945,7 @@ mod tests {
         let audio = directory.0.join("Track.mp3");
         fs::write(&audio, b"").unwrap();
 
-        let report = finalize_with_isrc(&audio, None, Some("GBUM71029604"), None, &english());
+        let report = finalize_with_isrc(&audio, None, Some("GBUM71029604"), None, None, &english());
 
         assert_eq!(report.failures, Vec::new());
         assert_eq!(report.isrcs_written, 1);
@@ -939,7 +1072,7 @@ mod tests {
         .unwrap();
 
         let korean = parse_language("Korean").unwrap();
-        let report = finalize_with_isrc(&audio, None, None, Some(&korean), &english());
+        let report = finalize_with_isrc(&audio, None, None, None, Some(&korean), &english());
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(
@@ -966,7 +1099,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = finalize_with_isrc(&audio, None, None, None, &english());
+        let report = finalize_with_isrc(&audio, None, None, None, None, &english());
 
         let tag = Tag::read_from_path(&audio).unwrap();
         assert_eq!(
@@ -986,6 +1119,7 @@ mod tests {
 
         let report = finalize_with_isrc(
             &audio,
+            None,
             None,
             None,
             None,

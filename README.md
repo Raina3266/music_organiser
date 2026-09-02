@@ -73,7 +73,10 @@ music-tag-transfer download links.txt --output ./music
 ```
 
 Every line is downloaded as MP3 with synchronised lyrics, and each ID3v2.3 tag
-is limited to the 15 supported metadata types. No credentials are needed:
+is limited to the 15 supported metadata types. Synced lyrics come from LRCLIB,
+matched against the length of the downloaded file so the timings belong to that
+recording rather than to some other cut of the song; spotDL's own `.lrc` is the
+fallback. No credentials are needed:
 copyright comes from iTunes with a MusicBrainz fallback, and a missing ISRC
 from MusicBrainz with a Deezer fallback. All three are open without an account.
 Setting `DISCOGS_TOKEN` adds Discogs as a last copyright fallback, for the
@@ -112,6 +115,7 @@ metadata whitelist, lyric handling, and the Spotify token modes.
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
 | `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
+| `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
@@ -226,7 +230,7 @@ outright makes it `1`.
 
 | Page | Contents |
 |---|---|
-| [docs/download.md](docs/download.md) | Input format, the spotDL command, one folder per album, the 15-frame whitelist, synced lyrics, file naming, Spotify token modes |
+| [docs/download.md](docs/download.md) | Input format, the spotDL command, one folder per album, the 15-frame whitelist, LRCLIB synced lyrics, file naming, Spotify token modes |
 | [docs/resolve.md](docs/resolve.md) | What Odesli resolves and what it leaves alone, rate limits, exit status |
 | [docs/delete.md](docs/delete.md) | Every supported tag name and its frame ID |
 | [docs/export.md](docs/export.md) | CSV layout |

@@ -11,6 +11,7 @@ pub mod deezer;
 pub mod discogs;
 pub(crate) mod http;
 pub mod itunes;
+pub mod lrclib;
 pub mod menu;
 pub mod musicbrainz;
 pub mod naming;

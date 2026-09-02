@@ -1,6 +1,7 @@
 //! Download Spotify and YouTube Music links through spotDL, clean and embed
 //! synced lyrics, standardise ID3 metadata, and maintain tags recursively.
 
+mod audio;
 pub mod cli;
 mod copyright;
 mod csv;

@@ -84,6 +84,7 @@ stops before starting spotDL.
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
 | `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
+| `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
 | `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
@@ -323,10 +324,41 @@ Every download asks spotDL for time-synced lyrics and for the `.lrc` file that
 carries them — `--lyrics synced --generate-lrc`, on every line of the input
 file, with no way to turn it off.
 
-After each successful download that `.lrc` file is pasted into the tag during
+### Why LRCLIB is asked first
+
+spotDL's `synced` provider searches on the track's name and artist and nothing
+else. No step in it checks how long the recording is, so an anniversary
+remaster, a radio edit, or a live take answers as readily as the cut actually on
+disk: the words come back right and the timings drift.
+
+[LRCLIB](https://lrclib.net) is asked first because it refuses that. A lookup
+carries the artist, title, album, and **the length of the file spotDL just
+wrote**, read back off its MPEG frames, and LRCLIB answers only when its record
+is within about two seconds of that. The wrong version of a song is therefore a
+miss rather than a plausible-looking answer — the same bargain the copyright
+lookups strike, where a wrong value is worse than none.
+
+| Source | Asked | Matched on |
+|---|---|---|
+| LRCLIB | Always, unless `--no-lyrics-lookup` | Artist, title, album, **and duration** |
+| spotDL's `.lrc` | When LRCLIB has nothing of that length | Artist and title only |
+
+It needs no account, key, or token. Only timed text is taken: LRCLIB also
+publishes plain lyrics, but replacing spotDL's timed text with untimed text
+would be a loss even when the words are better. A track LRCLIB knows to be
+instrumental is left alone rather than fallen back on.
+
+A file whose duration cannot be read is not asked about at all — with nothing to
+check a candidate against, the lookup would be exactly the loose search it
+exists to avoid.
+
+### Pasting it into the tag
+
+After each successful download the winning text is pasted into the tag during
 the same metadata rewrite that applies the whitelist:
 
-1. The `.lrc` file sitting beside the audio is read.
+1. The lyrics are taken from LRCLIB, or from the `.lrc` file beside the audio
+   when LRCLIB had none.
 2. Empty lines and lines containing only timestamps, such as `[00:00:00]` or
    `[00:12.50][00:42.50]`, are removed.
 3. The cleaned text is written to the ID3v2.3 `USLT` lyrics frame. Timestamps
@@ -334,7 +366,8 @@ the same metadata rewrite that applies the whitelist:
    replaced.
 4. Every `SYLT` synchronised-lyrics frame is removed, including spotDL's.
 5. The file is read back from disk. Only if the stored `USLT` frame matches the
-   cleaned text, and no `SYLT` frame survives, is the `.lrc` file deleted.
+   cleaned text, and no `SYLT` frame survives, is the `.lrc` file deleted — it
+   is deleted whether its own text won or LRCLIB's superseded it.
 
 `USLT` is the frame players actually read; `SYLT` is the one most of them
 ignore. Players that do understand timed lyrics parse the timestamps out of the
@@ -347,8 +380,10 @@ Only the language detector sees the lyrics without their timestamps — the
 If any of those steps fails, the `.lrc` file is **kept** so its lyrics are
 never the thing that gets lost, nothing is written to the audio file, and the
 line it belongs to is reported as failed so it appears in the retry list. An
-`.lrc` file with no content left after cleaning counts as a failure; an untimed
-one is pasted like any other. A line for which spotDL generated no `.lrc` file
+`.lrc` file with no content left after cleaning counts as a failure when it was
+the only candidate; when LRCLIB has already answered it is merely the losing
+one, and the file finishes normally. An untimed `.lrc` is pasted like any
+other. A line for which spotDL generated no `.lrc` file
 is not a failure either: the metadata whitelist is still applied, and there
 were simply no synced lyrics to paste.
 

@@ -22,6 +22,7 @@ pub struct Config {
     pub no_copyright: bool,
     /// Skip the MusicBrainz language lookup and read the lyrics instead.
     pub no_language_lookup: bool,
+    pub no_lyrics_lookup: bool,
     /// Recorded when the lyrics cannot settle the language.
     pub language: Language,
     pub max_attempts: u32,
@@ -51,6 +52,7 @@ where
     let mut auto_download_deno = false;
     let mut no_copyright = false;
     let mut no_language_lookup = false;
+    let mut no_lyrics_lookup = false;
     let mut language = DEFAULT_LANGUAGE.to_owned();
     let mut max_attempts = 3;
     let mut max_rate_limit_wait = 300;
@@ -67,6 +69,7 @@ where
             "--auto-download-deno" => auto_download_deno = true,
             "--no-copyright" => no_copyright = true,
             "--no-language-lookup" => no_language_lookup = true,
+            "--no-lyrics-lookup" => no_lyrics_lookup = true,
             "--language" => language = next_value(&args, &mut index, argument)?,
             "-o" | "--output" => {
                 output = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
@@ -157,6 +160,7 @@ where
         auto_download_deno,
         no_copyright,
         no_language_lookup,
+        no_lyrics_lookup,
         language,
         max_attempts,
         max_rate_limit_wait,
@@ -256,6 +260,7 @@ OPTIONS:
                                       copyright lookups
         --no-language-lookup          Skip the MusicBrainz language lookup and read the
                                       lyrics instead
+        --no-lyrics-lookup            Skip LRCLIB and keep spotDL's own .lrc
         --language <LANGUAGE>         Fallback language, by name or code [default: English]
         --max-attempts <N>            Attempts for genuine network failures [default: 3]
         --max-rate-limit-wait <SECS>  Longest Retry-After delay to wait [default: 300]
@@ -333,8 +338,16 @@ SYNCED LYRICS:
 
         --lyrics synced --generate-lrc
 
-    Empty lines and timestamp-only lines are removed from that .lrc text. The
-    remaining timestamps and lyric lines are pasted into the ordinary USLT
+    That search goes out on the track's name and artist alone, so a remaster or
+    a radio edit answers as readily as the cut on disk and its timings drift.
+    LRCLIB is therefore asked first, with the length of the file spotDL just
+    wrote: it answers only within a couple of seconds of that length, so the
+    wrong version of a song is a miss rather than a plausible answer. What it
+    returns wins; when it has nothing that long, spotDL's own .lrc is used
+    instead. --no-lyrics-lookup skips LRCLIB and keeps spotDL's text.
+
+    Empty lines and timestamp-only lines are removed from whichever text won.
+    The remaining timestamps and lyric lines are pasted into the ordinary USLT
     frame. The frame is read back from the file to verify it, and only then is
     the .lrc file deleted. If any of that fails, the .lrc file is kept and the
     line is added to the retry list.

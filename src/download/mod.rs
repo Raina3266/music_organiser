@@ -14,7 +14,8 @@ use crate::files::{self, MusicSnapshot};
 use crate::metadata::{self, MetadataReport};
 use crate::sources::{
     Limits, deezer::Client as DeezerClient, discogs::Client as DiscogsClient,
-    itunes::Client as ItunesClient, musicbrainz::Client as MusicBrainzClient,
+    itunes::Client as ItunesClient, lrclib::Client as LrclibClient,
+    musicbrainz::Client as MusicBrainzClient,
 };
 use std::env;
 use std::fs;
@@ -31,6 +32,7 @@ struct MetadataLookups<'a> {
     musicbrainz: Option<&'a mut MusicBrainzClient>,
     discogs: Option<&'a mut DiscogsClient>,
     deezer: Option<&'a mut DeezerClient>,
+    lrclib: Option<&'a mut LrclibClient>,
 }
 
 /// Download every unique line in `config.input` through spotDL, then rewrite
@@ -134,6 +136,17 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         }
     }
 
+    let mut lrclib = if config.no_lyrics_lookup {
+        println!("Lyrics: LRCLIB disabled with --no-lyrics-lookup; spotDL's own .lrc is kept.");
+        None
+    } else {
+        println!(
+            "Lyrics will be looked up on LRCLIB by the length of each file, \
+             falling back to spotDL's .lrc when nothing of that length matches."
+        );
+        Some(LrclibClient::new(Limits::default())?)
+    };
+
     let mut deezer = Some(DeezerClient::new(Limits::default())?);
     if config.no_language_lookup {
         println!(
@@ -176,6 +189,7 @@ pub fn run(mut config: Config) -> Result<i32, String> {
                             musicbrainz: musicbrainz.as_mut(),
                             discogs: discogs.as_mut(),
                             deezer: deezer.as_mut(),
+                            lrclib: lrclib.as_mut(),
                         },
                         &mut metadata_totals,
                     )
@@ -233,9 +247,12 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         metadata_totals.languages_detected, metadata_totals.files_updated, config.language.name
     );
     println!(
-        "Lyrics: pasted {} .lrc file(s) into USLT ({} line(s)); removed {} SYLT frame(s).",
+        "Lyrics: wrote USLT for {} file(s) ({} line(s)); {} matched on LRCLIB by length \
+         and {} came from spotDL's .lrc. Removed {} SYLT frame(s).",
         metadata_totals.lyrics_embedded,
         metadata_totals.lines_embedded,
+        metadata_totals.lyrics_from_lrclib,
+        metadata_totals.lyrics_embedded - metadata_totals.lyrics_from_lrclib,
         metadata_totals.sylt_frames_removed
     );
     println!(
@@ -295,6 +312,7 @@ fn apply_metadata(
         mut musicbrainz,
         mut discogs,
         mut deezer,
+        mut lrclib,
     } = lookups;
 
     let files = match downloaded_files(config, entry, before) {
@@ -398,10 +416,32 @@ fn apply_metadata(
         let language = (!config.no_language_lookup)
             .then_some(track_metadata.language)
             .flatten();
+        // Asked with the length of the file spotDL just wrote, so a set of
+        // timings belonging to some other cut of the song is a miss rather
+        // than a plausible answer. Without a readable duration there is
+        // nothing to check a candidate against, so nothing is asked.
+        let synced_lyrics = match (
+            lrclib.as_deref_mut(),
+            evidence.as_ref(),
+            crate::audio::duration_seconds(file),
+        ) {
+            (Some(client), Some(track), Some(seconds)) => {
+                match client.synced_lyrics(track, seconds) {
+                    Ok(found) => found,
+                    Err(error) => {
+                        eprintln!("Lyrics (LRCLIB): {error}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+
         report.absorb(metadata::finalize_with_isrc(
             file,
             copyright.as_deref(),
             looked_up_isrc.as_deref(),
+            synced_lyrics.as_deref(),
             language.as_ref(),
             &config.language,
         ));
@@ -435,8 +475,13 @@ fn apply_metadata(
     }
     if report.files_updated > 0 {
         let lyrics = if report.lyrics_embedded > 0 {
+            let source = if report.lyrics_from_lrclib > 0 {
+                "LRCLIB, matched on this file's length"
+            } else {
+                "spotDL's .lrc"
+            };
             format!(
-                ", pasted {} line(s) of synced lyrics into USLT and deleted the .lrc file",
+                ", wrote {} line(s) of synced lyrics into USLT from {source}",
                 report.lines_embedded
             )
         } else {
@@ -823,6 +868,7 @@ mod tests {
             auto_download_deno: false,
             no_copyright: false,
             no_language_lookup: false,
+            no_lyrics_lookup: true,
             language: crate::lyrics::parse_language("English").unwrap(),
             max_attempts: 3,
             max_rate_limit_wait: 300,
