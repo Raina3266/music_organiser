@@ -156,10 +156,18 @@ pub(super) fn download(
     program: &str,
     output_dir: &Path,
     query: &str,
+    verified_audio_search: bool,
     official_api: bool,
     token: Option<&str>,
 ) -> Result<ProcessResult, String> {
-    let mut command = download_command(program, output_dir, query, official_api, token);
+    let mut command = download_command(
+        program,
+        output_dir,
+        query,
+        verified_audio_search,
+        official_api,
+        token,
+    );
     run_relayed(&mut command, program)
 }
 
@@ -172,6 +180,7 @@ fn download_command(
     program: &str,
     output_dir: &Path,
     query: &str,
+    verified_audio_search: bool,
     official_api: bool,
     token: Option<&str>,
 ) -> Command {
@@ -181,6 +190,17 @@ fn download_command(
         if let Some(token) = token {
             command.arg("--auth-token").arg(token);
         }
+    }
+    // A bare Spotify link leaves the audio choice to spotDL. Restrict that
+    // search to YouTube Music's verified results so a plausible-looking live
+    // upload is rejected instead of silently replacing the studio recording.
+    // Exact-source pairs and YouTube URLs already pin their audio and do not
+    // need this restriction.
+    if verified_audio_search {
+        command
+            .arg("--audio")
+            .arg("youtube-music")
+            .arg("--only-verified-results");
     }
     command
         .args(FIXED_ARGUMENTS)
@@ -457,10 +477,17 @@ mod tests {
         "https://music.youtube.com/watch?v=dQw4w9WgXcQ|https://open.spotify.com/track/abc123";
 
     fn arguments(official_api: bool, token: Option<&str>) -> Vec<String> {
-        download_command("spotdl", Path::new("downloads"), PAIR, official_api, token)
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect()
+        download_command(
+            "spotdl",
+            Path::new("downloads"),
+            PAIR,
+            false,
+            official_api,
+            token,
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect()
     }
 
     fn result(success: bool, output: &str) -> ProcessResult {
@@ -546,6 +573,25 @@ mod tests {
     }
 
     #[test]
+    fn a_spotify_audio_search_accepts_only_verified_youtube_music_results() {
+        let query = "https://open.spotify.com/track/abc123";
+        let args = download_command("spotdl", Path::new("downloads"), query, true, false, None)
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        let audio = args
+            .iter()
+            .position(|argument| argument == "--audio")
+            .expect("Spotify searches always choose the YouTube Music provider");
+        assert_eq!(args[audio + 1], "youtube-music");
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--only-verified-results")
+        );
+    }
+
+    #[test]
     fn token_free_command_does_not_force_the_official_api() {
         let args = arguments(false, None);
         assert!(!args.iter().any(|argument| argument == "--use-official-api"));
@@ -564,7 +610,14 @@ mod tests {
 
     #[test]
     fn relative_spotdl_paths_survive_the_download_working_directory() {
-        let command = download_command("./tools/spotdl", Path::new("downloads"), PAIR, false, None);
+        let command = download_command(
+            "./tools/spotdl",
+            Path::new("downloads"),
+            PAIR,
+            false,
+            false,
+            None,
+        );
         assert!(Path::new(command.get_program()).is_absolute());
     }
 

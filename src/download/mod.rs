@@ -578,6 +578,7 @@ fn download_entry(
             &config.spotdl,
             &config.output,
             &entry.query,
+            entry.source.searches_for_audio(),
             config.official_api,
             auth_token.as_deref(),
         )?;

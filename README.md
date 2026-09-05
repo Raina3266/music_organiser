@@ -103,6 +103,12 @@ Reads one link per line and downloads each through spotDL, then rewrites the
 tag. See [docs/download.md](docs/download.md) for the input format, the
 metadata whitelist, lyric handling, and the Spotify token modes.
 
+For a bare Spotify link, automatic audio matching is restricted to verified
+YouTube Music results. If no verified result exists, the line is kept in the
+retry list rather than accepting an unverified live or user upload. An
+exact-source pair still provides the strongest guarantee because it pins the
+YouTube recording directly.
+
 | Option | Meaning |
 |---|---|
 | `-o, --output <DIR>` | Download directory; default `~/Documents/Music` |

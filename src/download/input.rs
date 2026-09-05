@@ -42,6 +42,12 @@ impl SpotifyKind {
 }
 
 impl Source {
+    /// Whether spotDL must search for the audio rather than receiving an exact
+    /// YouTube URL from the input line.
+    pub(super) fn searches_for_audio(&self) -> bool {
+        matches!(self, Source::Spotify { .. })
+    }
+
     /// The Spotify track ID when the line names exactly one track.
     ///
     /// It ties a downloaded file back to this entry through spotDL's

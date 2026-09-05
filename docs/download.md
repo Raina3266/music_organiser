@@ -109,6 +109,19 @@ spotdl download "LINE" \
     --overwrite force --format mp3 --lyrics synced --generate-lrc
 ```
 
+When `LINE` is a bare Spotify track, album, or playlist, the command also
+passes:
+
+```text
+--audio youtube-music --only-verified-results
+```
+
+That confines automatic audio matching to verified YouTube Music results. If
+there is no verified match, the line fails and is preserved in `output.txt`
+instead of falling through to an unverified upload such as a random live
+version. An exact-source pair does not need these options because its YouTube
+URL already pins the recording.
+
 Those four options are fixed and are not configurable:
 
 | Option | Effect |
@@ -117,6 +130,12 @@ Those four options are fixed and are not configurable:
 | `--format mp3` | Output is always MP3, so an ID3 tag can always be written |
 | `--lyrics synced` | spotDL prefers a provider that has time-synced lyrics |
 | `--generate-lrc` | spotDL writes the timed lyrics next to the audio as `.lrc` |
+
+For Spotify-only lines, `--audio youtube-music` and
+`--only-verified-results` are fixed as well. Verification makes automatic
+matching safer, but the only absolute choice is an exact-source pair: an
+official artist can publish both studio and live recordings through verified
+channels.
 
 The command also passes `--print-errors`, `--max-retries 0` (retries are
 handled here instead), and spotDL's output template:
