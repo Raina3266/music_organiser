@@ -51,6 +51,16 @@ pub(super) enum Classification {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AudioSearch {
+    /// The input already contains the exact YouTube recording to download.
+    Pinned,
+    /// Search YouTube Music, accepting only verified results.
+    Verified,
+    /// Search YouTube Music without spotDL's verified-result restriction.
+    Unverified,
+}
+
 pub(super) fn verify(program: &str) -> Result<String, String> {
     let result = Command::new(resolve_program(program))
         .arg("--version")
@@ -156,7 +166,7 @@ pub(super) fn download(
     program: &str,
     output_dir: &Path,
     query: &str,
-    verified_audio_search: bool,
+    audio_search: AudioSearch,
     official_api: bool,
     token: Option<&str>,
 ) -> Result<ProcessResult, String> {
@@ -164,7 +174,7 @@ pub(super) fn download(
         program,
         output_dir,
         query,
-        verified_audio_search,
+        audio_search,
         official_api,
         token,
     );
@@ -180,7 +190,7 @@ fn download_command(
     program: &str,
     output_dir: &Path,
     query: &str,
-    verified_audio_search: bool,
+    audio_search: AudioSearch,
     official_api: bool,
     token: Option<&str>,
 ) -> Command {
@@ -191,16 +201,20 @@ fn download_command(
             command.arg("--auth-token").arg(token);
         }
     }
-    // A bare Spotify link leaves the audio choice to spotDL. Restrict that
-    // search to YouTube Music's verified results so a plausible-looking live
-    // upload is rejected instead of silently replacing the studio recording.
-    // Exact-source pairs and YouTube URLs already pin their audio and do not
-    // need this restriction.
-    if verified_audio_search {
-        command
-            .arg("--audio")
-            .arg("youtube-music")
-            .arg("--only-verified-results");
+    // A bare Spotify link leaves the audio choice to spotDL. Search YouTube
+    // Music's verified results first, then let the caller relax verification
+    // after a miss. Exact-source pairs and YouTube URLs already pin the audio.
+    match audio_search {
+        AudioSearch::Pinned => {}
+        AudioSearch::Verified => {
+            command
+                .arg("--audio")
+                .arg("youtube-music")
+                .arg("--only-verified-results");
+        }
+        AudioSearch::Unverified => {
+            command.arg("--audio").arg("youtube-music");
+        }
     }
     command
         .args(FIXED_ARGUMENTS)
@@ -410,6 +424,7 @@ pub(super) fn classify(result: &ProcessResult) -> Classification {
         &[
             "no songs found",
             "no song matches found",
+            "no results found",
             "couldn't find a match",
             "could not find a match",
             "downloaded 0 song",
@@ -468,8 +483,8 @@ pub(super) fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Classification, ProcessResult, classify, download_command, forcing_config_settings,
-        parse_retry_after, parse_version,
+        AudioSearch, Classification, ProcessResult, classify, download_command,
+        forcing_config_settings, parse_retry_after, parse_version,
     };
     use std::path::Path;
 
@@ -481,7 +496,7 @@ mod tests {
             "spotdl",
             Path::new("downloads"),
             PAIR,
-            false,
+            AudioSearch::Pinned,
             official_api,
             token,
         )
@@ -515,6 +530,12 @@ mod tests {
             Classification::RateLimited(Some(86_400))
         );
         assert_eq!(parse_retry_after("Retry-After: 17"), Some(17));
+    }
+
+    #[test]
+    fn a_missing_audio_result_is_available_for_the_unverified_fallback() {
+        let output = "LookupError: No results found for song: Artist - Song";
+        assert_eq!(classify(&result(false, output)), Classification::NotFound);
     }
 
     #[test]
@@ -575,10 +596,17 @@ mod tests {
     #[test]
     fn a_spotify_audio_search_accepts_only_verified_youtube_music_results() {
         let query = "https://open.spotify.com/track/abc123";
-        let args = download_command("spotdl", Path::new("downloads"), query, true, false, None)
-            .get_args()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            query,
+            AudioSearch::Verified,
+            false,
+            None,
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
 
         let audio = args
             .iter()
@@ -587,6 +615,33 @@ mod tests {
         assert_eq!(args[audio + 1], "youtube-music");
         assert!(
             args.iter()
+                .any(|argument| argument == "--only-verified-results")
+        );
+    }
+
+    #[test]
+    fn the_fallback_keeps_youtube_music_but_relaxes_verification() {
+        let query = "https://open.spotify.com/track/abc123";
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            query,
+            AudioSearch::Unverified,
+            false,
+            None,
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        let audio = args
+            .iter()
+            .position(|argument| argument == "--audio")
+            .expect("the fallback still searches YouTube Music");
+        assert_eq!(args[audio + 1], "youtube-music");
+        assert!(
+            !args
+                .iter()
                 .any(|argument| argument == "--only-verified-results")
         );
     }
@@ -614,7 +669,7 @@ mod tests {
             "./tools/spotdl",
             Path::new("downloads"),
             PAIR,
-            false,
+            AudioSearch::Pinned,
             false,
             None,
         );

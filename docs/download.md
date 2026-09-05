@@ -116,11 +116,12 @@ passes:
 --audio youtube-music --only-verified-results
 ```
 
-That confines automatic audio matching to verified YouTube Music results. If
-there is no verified match, the line fails and is preserved in `output.txt`
-instead of falling through to an unverified upload such as a random live
-version. An exact-source pair does not need these options because its YouTube
-URL already pins the recording.
+That makes verified YouTube Music results the first choice for automatic audio
+matching. If there is no verified match, the program retries once with
+`--audio youtube-music` but without `--only-verified-results`. The line is
+preserved in `output.txt` only if that fallback also fails. Because the
+fallback may select a live or user upload, an exact-source pair is still the
+strongest option: its YouTube URL pins the recording.
 
 Those four options are fixed and are not configurable:
 
@@ -131,11 +132,10 @@ Those four options are fixed and are not configurable:
 | `--lyrics synced` | spotDL prefers a provider that has time-synced lyrics |
 | `--generate-lrc` | spotDL writes the timed lyrics next to the audio as `.lrc` |
 
-For Spotify-only lines, `--audio youtube-music` and
-`--only-verified-results` are fixed as well. Verification makes automatic
-matching safer, but the only absolute choice is an exact-source pair: an
-official artist can publish both studio and live recordings through verified
-channels.
+For Spotify-only lines, `--audio youtube-music` is fixed as well, and the first
+attempt adds `--only-verified-results`. Verification makes automatic matching
+safer, but the fallback deliberately trades that protection for a better
+chance of finding audio. The only absolute choice is an exact-source pair.
 
 The command also passes `--print-errors`, `--max-retries 0` (retries are
 handled here instead), and spotDL's output template:

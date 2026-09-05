@@ -572,13 +572,18 @@ fn download_entry(
     let mut network_attempt = 1u32;
     let mut token_replacements = 0u32;
     let mut waited_for_rate_limit = false;
+    let mut audio_search = if entry.source.searches_for_audio() {
+        spotdl::AudioSearch::Verified
+    } else {
+        spotdl::AudioSearch::Pinned
+    };
 
     loop {
         let result = spotdl::download(
             &config.spotdl,
             &config.output,
             &entry.query,
-            entry.source.searches_for_audio(),
+            audio_search,
             config.official_api,
             auth_token.as_deref(),
         )?;
@@ -705,8 +710,16 @@ fn download_entry(
                 thread::sleep(Duration::from_secs(delay));
             }
             Classification::NotFound => {
+                if audio_search == spotdl::AudioSearch::Verified {
+                    eprintln!(
+                        "No verified YouTube Music result was found; retrying without the verified-result restriction."
+                    );
+                    audio_search = spotdl::AudioSearch::Unverified;
+                    network_attempt = 1;
+                    continue;
+                }
                 return Ok(EntryOutcome::Failed(
-                    "spotDL could not find downloadable audio for this pair".into(),
+                    "spotDL could not find downloadable audio for this input".into(),
                 ));
             }
             Classification::Failed => {
