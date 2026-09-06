@@ -9,6 +9,8 @@ use crate::download::odesli;
 use crate::download::resolve;
 use crate::export::default_csv_path;
 use crate::frames::{SUPPORTED_TAGS, TagSpec, find_tag};
+use crate::search_ytm;
+use crate::sources::ytmusic;
 use crate::sources::{Limits, Source};
 
 pub const HELP: &str = concat!(
@@ -31,10 +33,15 @@ USAGE:
     ",
     env!("CARGO_PKG_NAME"),
     " resolve <INPUT_FILE> [OUTPUT_FILE] [--api-key KEY] [--country XX]
+    ",
+    env!("CARGO_PKG_NAME"),
+    " search-ytm-url <INPUT_CSV> [OUTPUT_CSV] [--overwrite]
 
 COMMANDS:
     download    Download Spotify and/or YouTube Music links through spotDL
     resolve     Pin Spotify links to their YouTube Music track through Odesli
+    search-ytm-url
+                Add a YouTube Music URL column to a CSV of Spotify tracks
     delete      Remove selected ID3 tags from a folder recursively
     export      Write every ID3 frame under a folder to one CSV file
     copyright   Look the TCOP copyright message up again in a music catalogue
@@ -49,6 +56,9 @@ EXAMPLES:
     ",
     env!("CARGO_PKG_NAME"),
     " resolve links.txt pinned.txt
+    ",
+    env!("CARGO_PKG_NAME"),
+    " search-ytm-url tracks.csv tracks-with-ytm.csv
     ",
     env!("CARGO_PKG_NAME"),
     " export \"/music\" frames.csv
@@ -75,6 +85,19 @@ recording instead of searching for one; a track it cannot place is left alone.
 Odesli has withdrawn anonymous access, so a key -- from ODESLI_API_KEY,
 --api-key, or --api-key-file -- is now required; without one the run stops at
 the first track and leaves every line bare for spotDL to search as before.
+
+The search-ytm-url command answers the same question for a table instead of a
+link file. It reads a CSV naming each track's song name, album name, artist
+name, and Spotify URL, searches YouTube Music for each row, and writes the file
+back out with a youtube_music_url column added. A row whose title and artist
+both match a result gets that link; a row nothing matches confidently is left
+empty, because a link to the wrong recording is worse than no link. Searching
+goes through the ytmusicapi Python package -- install it with
+`pip install ytmusicapi` -- and --python names the interpreter to run it with.
+Column headers are matched loosely, so song_name, Song Name, and songName all
+find the same column, and every column the input had is copied through
+unchanged. Running the command over its own output only searches for the rows
+that are still empty.
 
 Downloads are token-free by default. Supplying --auth-token, --token-file, or
 SPOTIFY_AUTH_TOKEN automatically enables Spotify's official API; no separate
@@ -154,6 +177,7 @@ pub enum Command {
         overwrite: bool,
     },
     Resolve(resolve::Config),
+    SearchYtmUrl(search_ytm::Config),
     Copyright {
         folder: PathBuf,
         /// The catalogues to ask, in order. `None` means nobody has chosen
@@ -195,6 +219,10 @@ where
         "export" => parse_export(&args[1..]),
         "copyright" => parse_copyright(&args[1..]),
         "resolve" => parse_resolve(&args[1..]),
+        // Spelled with leading dashes too, because it names a lookup rather
+        // than a folder full of files and reads as a flag to anyone who thinks
+        // of it that way.
+        "search-ytm-url" | "--search-ytm-url" => parse_search_ytm_url(&args[1..]),
         _ => Err(format!("unknown command {command:?}")),
     }
 }
@@ -473,6 +501,70 @@ fn parse_resolve(args: &[OsString]) -> Result<Command, String> {
     }))
 }
 
+/// Where the answered table goes when no path was given: beside the input,
+/// under a name that says what was added to it.
+fn default_ytm_csv_path(input: &Path) -> PathBuf {
+    let stem = input.file_stem().map_or_else(
+        || "tracks".to_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    );
+    let extension = input.extension().map_or_else(
+        || "csv".to_owned(),
+        |value| value.to_string_lossy().into_owned(),
+    );
+    input.with_file_name(format!("{stem}-with-ytm.{extension}"))
+}
+
+fn parse_search_ytm_url(args: &[OsString]) -> Result<Command, String> {
+    let mut positional = Vec::new();
+    let mut overwrite = false;
+    let mut python = ytmusic::DEFAULT_PYTHON.to_owned();
+
+    let mut index = 0;
+    while index < args.len() {
+        let argument = args[index].to_string_lossy().into_owned();
+        match argument.as_str() {
+            "--overwrite" => overwrite = true,
+            "--python" => python = next_value(args, &mut index, "--python")?,
+            _ if argument.starts_with("--python=") => {
+                python = argument["--python=".len()..].to_owned();
+            }
+            _ if argument.starts_with('-') => {
+                return Err(format!("unknown option {argument:?}"));
+            }
+            _ => positional.push(&args[index]),
+        }
+        index += 1;
+    }
+
+    let input = match positional.len() {
+        1 | 2 => PathBuf::from(positional[0]),
+        _ => {
+            return Err(
+                "search-ytm-url requires an input CSV and an optional output path".to_owned(),
+            );
+        }
+    };
+    if python.trim().is_empty() {
+        return Err("--python expects the name of an interpreter".to_owned());
+    }
+    let output = positional
+        .get(1)
+        .map_or_else(|| default_ytm_csv_path(&input), PathBuf::from);
+    // Writing over the input would destroy the table this is reading from, and
+    // a row already written cannot be read back to answer the next one.
+    if output == input {
+        return Err("the answered CSV would overwrite the input file".to_owned());
+    }
+
+    Ok(Command::SearchYtmUrl(search_ytm::Config {
+        input,
+        output,
+        overwrite,
+        python,
+    }))
+}
+
 /// The value that follows an option, advancing past it.
 fn next_value(args: &[OsString], index: &mut usize, option: &str) -> Result<String, String> {
     *index += 1;
@@ -594,6 +686,84 @@ mod tests {
         assert!(parse_args(strings(&["resolve"])).is_err());
         assert!(parse_args(strings(&["resolve", "a.txt", "b.txt", "c.txt"])).is_err());
         assert!(parse_args(strings(&["resolve", "links.txt", "--max-attempts", "0"])).is_err());
+    }
+
+    #[test]
+    fn parses_search_ytm_url_with_its_defaults() {
+        let Command::SearchYtmUrl(config) =
+            parse_args(strings(&["search-ytm-url", "tracks.csv"])).unwrap()
+        else {
+            panic!("expected a search-ytm-url command");
+        };
+
+        assert_eq!(config.input, PathBuf::from("tracks.csv"));
+        // No output path given, so one is derived beside the input.
+        assert_eq!(config.output, PathBuf::from("tracks-with-ytm.csv"));
+        assert_eq!(config.python, ytmusic::DEFAULT_PYTHON);
+        assert!(!config.overwrite);
+    }
+
+    /// It reads as a flag to anyone who thinks of it as one, so both spellings
+    /// name the same command.
+    #[test]
+    fn search_ytm_url_answers_to_the_dashed_spelling_too() {
+        let dashed = parse_args(strings(&["--search-ytm-url", "tracks.csv"])).unwrap();
+        let plain = parse_args(strings(&["search-ytm-url", "tracks.csv"])).unwrap();
+
+        assert_eq!(dashed, plain);
+    }
+
+    #[test]
+    fn parses_search_ytm_url_options_in_both_spellings() {
+        let Command::SearchYtmUrl(config) = parse_args(strings(&[
+            "search-ytm-url",
+            "/music/tracks.csv",
+            "/music/answered.csv",
+            "--overwrite",
+            "--python=/usr/bin/python3.12",
+        ]))
+        .unwrap() else {
+            panic!("expected a search-ytm-url command");
+        };
+
+        assert_eq!(config.input, PathBuf::from("/music/tracks.csv"));
+        assert_eq!(config.output, PathBuf::from("/music/answered.csv"));
+        assert!(config.overwrite);
+        assert_eq!(config.python, "/usr/bin/python3.12");
+
+        let Command::SearchYtmUrl(spaced) = parse_args(strings(&[
+            "search-ytm-url",
+            "t.csv",
+            "--python",
+            "python3.12",
+        ]))
+        .unwrap() else {
+            panic!("expected a search-ytm-url command");
+        };
+        assert_eq!(spaced.python, "python3.12");
+    }
+
+    /// The derived output goes beside the input, not into the working
+    /// directory, so answering a file by absolute path lands next to it.
+    #[test]
+    fn the_derived_csv_keeps_the_input_folder_and_extension() {
+        let Command::SearchYtmUrl(config) =
+            parse_args(strings(&["search-ytm-url", "/music/export.tsv"])).unwrap()
+        else {
+            panic!("expected a search-ytm-url command");
+        };
+
+        assert_eq!(config.output, PathBuf::from("/music/export-with-ytm.tsv"));
+    }
+
+    #[test]
+    fn rejects_search_ytm_url_arguments_that_would_lose_the_input() {
+        // Writing over the table being read would destroy it halfway through.
+        assert!(parse_args(strings(&["search-ytm-url", "t.csv", "t.csv"])).is_err());
+        assert!(parse_args(strings(&["search-ytm-url"])).is_err());
+        assert!(parse_args(strings(&["search-ytm-url", "a.csv", "b.csv", "c.csv"])).is_err());
+        assert!(parse_args(strings(&["search-ytm-url", "t.csv", "--python", "  "])).is_err());
+        assert!(parse_args(strings(&["search-ytm-url", "t.csv", "--nonsense"])).is_err());
     }
 
     #[test]

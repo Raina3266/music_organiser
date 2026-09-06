@@ -12,6 +12,7 @@ mod files;
 mod frames;
 mod lyrics;
 pub mod metadata;
+pub mod search_ytm;
 pub mod sources;
 
 pub use copyright::{
@@ -26,3 +27,4 @@ pub use files::FileError;
 pub use frames::{SUPPORTED_TAGS, TagSpec};
 pub use lyrics::{Language, parse_language};
 pub use metadata::{MetadataReport, album_of, evidence_of, finalize};
+pub use search_ytm::{SearchError, SearchReport};

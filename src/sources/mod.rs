@@ -16,6 +16,7 @@ pub mod menu;
 pub mod musicbrainz;
 pub mod naming;
 pub mod spotify;
+pub mod ytmusic;
 
 pub use http::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_THROTTLE_RETRIES, DEFAULT_MAX_WAIT};
 

@@ -13,6 +13,33 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 `load_config`, or clear the official-API settings named in the error. Use
 `--official-api` only when that mode is intentional.
 
+## `cannot import ytmusicapi`
+
+`search-ytm-url` searches through the ytmusicapi Python package. Install it into
+the interpreter the command actually runs:
+
+```bash
+python3 -m pip install ytmusicapi
+```
+
+If Python 3 is not on the `PATH` as `python3`, or the package is installed into
+a different interpreter or a virtual environment, name that one:
+`--python /path/to/python3`. Nothing else is needed — searching is anonymous, so
+there is no token or `ytmusicapi` setup file to configure.
+
+## Every `search-ytm-url` cell came back empty
+
+The song and artist columns are what a match is checked against, and the run
+says which headers it read them from on its first line. If it named the wrong
+columns, or reported none, rename the headers or check that the file really is
+comma-separated — a tab- or semicolon-separated export reads as one giant
+column.
+
+If the columns were right, the rows genuinely did not match: a cell is filled
+only when the result's title and one of its credited artists both match. A row
+whose artist column holds something other than an artist — a genre, a playlist
+name, a blank — can never match, however right the title is.
+
 ## No copyright was written
 
 Either the source had no release matching both the album artist and the album

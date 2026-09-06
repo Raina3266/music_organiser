@@ -8,6 +8,7 @@ library on disk.
 |---|---|
 | [`download`](docs/download.md) | Download Spotify and/or YouTube Music links through spotDL and rewrite their ID3 metadata |
 | [`resolve`](docs/resolve.md) | Pin Spotify links to their YouTube Music track through Odesli, so `download` does not have to search. **Needs an Odesli API key** — anonymous access has been withdrawn |
+| [`search-ytm-url`](docs/search-ytm-url.md) | Add a `youtube_music_url` column to a CSV of Spotify tracks, by searching YouTube Music for each song, album, and artist. Needs no key |
 | [`delete`](docs/delete.md) | Remove selected ID3 frames recursively |
 | [`export`](docs/export.md) | Write every ID3 frame found recursively into one CSV file |
 | [`copyright`](docs/copyright.md) | Look the `TCOP` copyright message up again for music already on disk |
@@ -25,6 +26,7 @@ A stable Rust toolchain with Rust 2024 edition support, plus:
 | `download` | spotDL 4.5.0 or newer, and FFmpeg |
 | Some YouTube downloads | Deno, system-wide or via `spotdl --download-deno` |
 | `copyright` with Discogs or Spotify | An access token for that source |
+| `search-ytm-url` | Python 3 and the [ytmusicapi](https://github.com/sigma67/ytmusicapi) package (`pip install ytmusicapi`) |
 | Everything else | Nothing extra |
 
 Check the external programs before downloading:
@@ -87,6 +89,7 @@ albums neither iTunes nor MusicBrainz knows.
 ```text
 music-tag-transfer download  [OPTIONS] <INPUT_FILE>
 music-tag-transfer resolve   <INPUT_FILE> [OUTPUT_FILE] [--api-key KEY] [--country XX]
+music-tag-transfer search-ytm-url <INPUT_CSV> [OUTPUT_CSV] [--overwrite] [--python PATH]
 music-tag-transfer delete    <FOLDER> "[Tag Name, Other Tag]" [--dry-run]
 music-tag-transfer export    <FOLDER> [OUTPUT_CSV] [--overwrite]
 music-tag-transfer copyright <FOLDER> [--source NAMES] [--only-missing] [--dry-run]
@@ -169,6 +172,42 @@ a pair the input already carried is copied through in that same Spotify-first
 order. With a key the run starts at two requests a second and lets Odesli's
 throttling correct it. See [docs/resolve.md](docs/resolve.md).
 
+### search-ytm-url
+
+Answers the same question for a table rather than a link file. Give it a CSV
+naming each track's song, album, artist, and Spotify URL, and it writes the file
+back out with a `youtube_music_url` column added:
+
+```bash
+pip install ytmusicapi
+music-tag-transfer search-ytm-url tracks.csv   # writes tracks-with-ytm.csv
+```
+
+```csv
+song name,album name,artist name,spotify_url,youtube_music_url
+Get Lucky,Random Access Memories,Daft Punk,https://open.spotify.com/track/69k...,https://music.youtube.com/watch?v=5NV6Rdv1a3I
+Instant Crush,Random Access Memories,Daft Punk,https://open.spotify.com/track/2cG...,
+```
+
+| Option | Meaning |
+|---|---|
+| `OUTPUT_CSV` | Where to write; defaults to the input name with `-with-ytm` added |
+| `--overwrite` | Allow the output file to be replaced |
+| `--python PATH` | The interpreter that runs ytmusicapi; default `python3` |
+
+Searching goes through the [ytmusicapi](https://github.com/sigma67/ytmusicapi)
+Python package, so no API key is needed. Header spellings are matched loosely —
+`song name`, `Song Name`, `song_name`, and `songName` all find the same column —
+and every column the input had is copied through unchanged.
+
+**An empty cell means nothing matched.** A cell is filled only when the result's
+title *and* one of its credited artists both match the row, using the same
+comparison `copyright` uses: a cover, a remix, or a karaoke version of the right
+title is not the same recording, and a wrong link would be downloaded as though
+it were right. Running the command over its own output only searches for the
+rows that are still empty. See
+[docs/search-ytm-url.md](docs/search-ytm-url.md).
+
 ### delete
 
 Removes the named ID3 frames from every music file under a folder. The
@@ -230,7 +269,9 @@ each catalogue needs, and how a run survives a rate limit.
 For `download`, any failed or unattempted line gives status 1 and is preserved
 in `output.txt`. For `resolve`, a track Odesli has no link for is an answer
 rather than a failure and leaves the status at `0`; a lookup that failed
-outright makes it `1`.
+outright makes it `1`. `search-ytm-url` counts the same way: a row nothing
+matched is an answer and leaves an empty cell, while a search that failed
+outright makes the status `1` — and either way every row is written.
 
 ## Documentation
 
@@ -238,6 +279,7 @@ outright makes it `1`.
 |---|---|
 | [docs/download.md](docs/download.md) | Input format, the spotDL command, one folder per album, the 15-frame whitelist, LRCLIB synced lyrics, file naming, Spotify token modes |
 | [docs/resolve.md](docs/resolve.md) | What Odesli resolves and what it leaves alone, rate limits, exit status |
+| [docs/search-ytm-url.md](docs/search-ytm-url.md) | The CSV columns it reads, how a match is decided, rerunning, feeding the result to `download` |
 | [docs/delete.md](docs/delete.md) | Every supported tag name and its frame ID |
 | [docs/export.md](docs/export.md) | CSV layout |
 | [docs/copyright.md](docs/copyright.md) | Choosing a catalogue, matching rules, rate limits, dry runs, change reports |

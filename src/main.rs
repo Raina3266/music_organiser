@@ -7,7 +7,7 @@ use std::{
 use music_tag_transfer::{
     FileError, TagSpec,
     cli::{Command, HELP, parse_args},
-    delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights,
+    delete_tags_recursively, download, export_frames_to_csv, refresh_copyrights, search_ytm,
     sources::{Chain, Limits, Source, menu},
     write_change_report,
 };
@@ -41,6 +41,7 @@ fn run() -> Result<ExitCode, String> {
         }
         Command::Download(config) => Ok(exit_code_of(download::run(config)?)),
         Command::Resolve(config) => Ok(exit_code_of(download::resolve::run(config)?)),
+        Command::SearchYtmUrl(config) => Ok(exit_code_of(search_ytm::run(config)?)),
         Command::Delete {
             folder,
             tags,
