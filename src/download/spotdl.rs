@@ -45,6 +45,9 @@ pub(super) enum Classification {
     QuotaExceeded(Option<u64>),
     RateLimited(Option<u64>),
     FreeClientUnavailable,
+    /// YouTube Music answered spotDL's search with something its API client
+    /// could not read, so no candidate recording was ever considered.
+    AudioSearchUnavailable,
     DenoRequired,
     Network,
     NotFound,
@@ -59,6 +62,38 @@ pub(super) enum AudioSearch {
     Verified,
     /// Search YouTube Music without spotDL's verified-result restriction.
     Unverified,
+    /// Search YouTube itself, through spotDL's yt-dlp provider.
+    ///
+    /// spotDL reaches YouTube Music through the ytmusicapi package and YouTube
+    /// through yt-dlp, so this is the only search left when the YouTube Music
+    /// API stops answering.
+    PlainYouTube,
+}
+
+impl AudioSearch {
+    /// The search left when YouTube Music itself will not answer.
+    ///
+    /// Both YouTube Music modes go through the same API, so dropping the
+    /// verified-result restriction would only ask it the same question again
+    /// and collect the same refusal: plain YouTube is the one search that does
+    /// not depend on it. A pinned input searched for nothing and so has
+    /// nothing to fall back to.
+    pub(super) fn without_youtube_music(self) -> Option<Self> {
+        match self {
+            AudioSearch::Verified | AudioSearch::Unverified => Some(AudioSearch::PlainYouTube),
+            AudioSearch::Pinned | AudioSearch::PlainYouTube => None,
+        }
+    }
+
+    /// How a run names this search to the person watching it.
+    pub(super) fn describe(self) -> &'static str {
+        match self {
+            AudioSearch::Pinned => "the YouTube recording the input pinned",
+            AudioSearch::Verified => "verified YouTube Music results",
+            AudioSearch::Unverified => "unverified YouTube Music results",
+            AudioSearch::PlainYouTube => "spotDL's plain YouTube search",
+        }
+    }
 }
 
 pub(super) fn verify(program: &str) -> Result<String, String> {
@@ -203,7 +238,12 @@ fn download_command(
     }
     // A bare Spotify link leaves the audio choice to spotDL. Search YouTube
     // Music's verified results first, then let the caller relax verification
-    // after a miss. Exact-source pairs and YouTube URLs already pin the audio.
+    // after a miss and leave YouTube Music altogether when its API will not
+    // answer. Exact-source pairs and YouTube URLs already pin the audio.
+    //
+    // `--only-verified-results` is never passed with the plain YouTube
+    // provider: nothing yt-dlp finds is marked verified, so the flag would
+    // discard every result it returned.
     match audio_search {
         AudioSearch::Pinned => {}
         AudioSearch::Verified => {
@@ -214,6 +254,9 @@ fn download_command(
         }
         AudioSearch::Unverified => {
             command.arg("--audio").arg("youtube-music");
+        }
+        AudioSearch::PlainYouTube => {
+            command.arg("--audio").arg("youtube");
         }
     }
     command
@@ -319,19 +362,37 @@ fn join_relay(
 
 pub(super) fn classify(result: &ProcessResult) -> Classification {
     let text = result.output.to_ascii_lowercase();
+    let song_errors = song_error_classes(&result.output);
     let has_success_marker = text.contains("downloaded \"")
         || (text.contains("skipping ")
             && (text.contains("file already exists") || text.contains("duplicate")));
-    let has_reported_failure = contains_any(
-        &text,
-        &[
-            "audioprovidererror",
-            "failed to download",
-            "an error occurred",
-            "traceback (most recent call last)",
-        ],
-    );
+    let has_reported_failure = !song_errors.is_empty()
+        || contains_any(
+            &text,
+            &[
+                "audioprovidererror",
+                "failed to download",
+                "an error occurred",
+                "traceback (most recent call last)",
+                "song is missing required fields",
+                "error occurred while reinitializing song",
+            ],
+        );
 
+    // Read a failed audio search off the per-song error lines rather than off
+    // the whole output: spotDL reaches YouTube Music through ytmusicapi, which
+    // decodes a reply before it looks at the status code, so a page served in
+    // place of results surfaces as a JSON error. The same error raised while
+    // reading Spotify metadata escapes spotDL's download loop instead and is
+    // printed as a traceback, where relaxing the audio search would not help.
+    if song_errors.iter().any(|class| {
+        matches!(
+            class.to_ascii_lowercase().as_str(),
+            "jsondecodeerror" | "ytmusicservererror" | "ytmusicgatederror"
+        )
+    }) {
+        return Classification::AudioSearchUnavailable;
+    }
     if text.contains("active premium subscription required for the owner of the app")
         || (text.contains("premium subscription") && text.contains("owner of the app"))
     {
@@ -440,6 +501,33 @@ pub(super) fn classify(result: &ProcessResult) -> Classification {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+/// The exception classes spotDL named on its `--print-errors` report lines.
+///
+/// spotDL exits successfully even when every song in a run failed, so a zero
+/// exit status says nothing on its own. What it does print, once per failed
+/// song, is `SOURCE_URL - ExceptionClass: message`, and that line is the only
+/// dependable sign that a run which reported no other trouble still downloaded
+/// nothing. The class name also says which half of the job failed, so an audio
+/// search that could not be read is not confused with a metadata one.
+fn song_error_classes(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter_map(|line| {
+            // The source URL comes first and holds no spaces, so the first
+            // ` - ` always separates it from the exception, whatever the
+            // message that follows contains.
+            let (source, error) = line.split_once(" - ")?;
+            if !source.contains("://") {
+                return None;
+            }
+            let class = error.split_once(':')?.0;
+            (!class.is_empty()
+                && !class.contains(char::is_whitespace)
+                && (class.ends_with("Error") || class.ends_with("Exception")))
+            .then_some(class)
+        })
+        .collect()
 }
 
 fn parse_retry_after(text: &str) -> Option<u64> {
@@ -724,6 +812,100 @@ mod tests {
 
         let success = "Some YouTube downloads require Deno. Run spotdl --download-deno or install Deno system-wide.\nDownloaded \"Artist - Song\"";
         assert_eq!(classify(&result(true, success)), Classification::Success);
+    }
+
+    #[test]
+    fn a_json_error_reported_per_song_is_a_failed_audio_search() {
+        // spotDL exits 0 here: every song failed, and only the report lines say so.
+        let output = "Processing query: https://open.spotify.com/track/7kg7gCtbQF6zPk0dKpsWTY\n\
+             JSONDecodeError: Expecting value: line 1 column 1 (char 0)\n\
+             https://open.spotify.com/track/7kg7gCtbQF6zPk0dKpsWTY - JSONDecodeError: Expecting value: line 1 column 1 (char 0)";
+        assert_eq!(
+            classify(&result(true, output)),
+            Classification::AudioSearchUnavailable
+        );
+
+        let gated = "https://open.spotify.com/track/abc123 - YTMusicServerError: Server returned HTTP 400: Bad Request.";
+        assert_eq!(
+            classify(&result(true, gated)),
+            Classification::AudioSearchUnavailable
+        );
+    }
+
+    #[test]
+    fn the_same_json_error_from_the_metadata_half_is_not_an_audio_search_failure() {
+        // Reading Spotify metadata happens before the download loop, so its
+        // failure escapes as a traceback rather than a per-song report line.
+        // No audio search was reached, so relaxing one would change nothing.
+        let output = "Processing query: https://open.spotify.com/track/abc123\n\
+             An error occurred\n\
+             Traceback (most recent call last):\n\
+             JSONDecodeError: Expecting value: line 1 column 1 (char 0)";
+        assert_eq!(classify(&result(false, output)), Classification::Failed);
+    }
+
+    #[test]
+    fn a_reported_song_error_outweighs_a_successful_exit_status() {
+        let output =
+            "https://open.spotify.com/track/abc123 - DownloaderError: Failed to embed metadata";
+        assert_eq!(classify(&result(true, output)), Classification::Failed);
+        assert_eq!(
+            classify(&result(
+                true,
+                "Song is missing required fields: Artist - Song"
+            )),
+            Classification::Failed
+        );
+    }
+
+    #[test]
+    fn an_ordinary_download_line_is_not_read_as_an_error_report() {
+        let output = "Downloaded \"Artist - Song\": https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+        assert!(super::song_error_classes(output).is_empty());
+        assert_eq!(classify(&result(true, output)), Classification::Success);
+    }
+
+    #[test]
+    fn a_silent_youtube_music_takes_both_of_its_modes_down_together() {
+        // Relaxing verification would ask the same unanswering API again, so
+        // either YouTube Music mode falls straight through to plain YouTube.
+        assert_eq!(
+            AudioSearch::Verified.without_youtube_music(),
+            Some(AudioSearch::PlainYouTube)
+        );
+        assert_eq!(
+            AudioSearch::Unverified.without_youtube_music(),
+            Some(AudioSearch::PlainYouTube)
+        );
+        assert_eq!(AudioSearch::PlainYouTube.without_youtube_music(), None);
+        assert_eq!(AudioSearch::Pinned.without_youtube_music(), None);
+    }
+
+    #[test]
+    fn the_last_audio_search_leaves_youtube_music_and_asks_for_no_verification() {
+        let query = "https://open.spotify.com/track/abc123";
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            query,
+            AudioSearch::PlainYouTube,
+            false,
+            None,
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        let audio = args
+            .iter()
+            .position(|argument| argument == "--audio")
+            .expect("the last fallback still names a provider");
+        assert_eq!(args[audio + 1], "youtube");
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument == "--only-verified-results")
+        );
     }
 
     #[test]

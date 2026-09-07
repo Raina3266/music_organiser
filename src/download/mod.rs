@@ -570,6 +570,7 @@ fn download_entry(
     deno_install_attempted: &mut bool,
 ) -> Result<EntryOutcome, String> {
     let mut network_attempt = 1u32;
+    let mut search_attempt = 1u32;
     let mut token_replacements = 0u32;
     let mut waited_for_rate_limit = false;
     let mut audio_search = if entry.source.searches_for_audio() {
@@ -657,6 +658,39 @@ fn download_entry(
                         .into(),
                 ));
             }
+            Classification::AudioSearchUnavailable => {
+                // Only this line is given up on. Whatever is refusing to
+                // answer is refusing per address rather than per track, so the
+                // batch carries on and every remaining line retries and falls
+                // back on its own account.
+                let reported =
+                    "YouTube Music answered spotDL's search with a page instead of results";
+                if search_attempt < config.max_attempts {
+                    let delay = 1u64 << search_attempt.min(5);
+                    search_attempt += 1;
+                    eprintln!(
+                        "{reported}; waiting {delay} seconds before retry {search_attempt}/{}...",
+                        config.max_attempts
+                    );
+                    thread::sleep(Duration::from_secs(delay));
+                    continue;
+                }
+
+                let Some(relaxed) = audio_search.without_youtube_music() else {
+                    return Ok(EntryOutcome::Failed(format!(
+                        "{reported} on {search_attempt} attempt(s), and {} did not download this input either. \
+                         Retry later, or pin the audio with an exact-source pair.",
+                        audio_search.describe()
+                    )));
+                };
+                eprintln!(
+                    "{reported} on {search_attempt} attempt(s); retrying with {}.",
+                    relaxed.describe()
+                );
+                audio_search = relaxed;
+                search_attempt = 1;
+                network_attempt = 1;
+            }
             Classification::DenoRequired => {
                 let setup = "spotDL needs Deno for this YouTube download.";
                 if *deno_install_attempted {
@@ -716,6 +750,7 @@ fn download_entry(
                     );
                     audio_search = spotdl::AudioSearch::Unverified;
                     network_attempt = 1;
+                    search_attempt = 1;
                     continue;
                 }
                 return Ok(EntryOutcome::Failed(

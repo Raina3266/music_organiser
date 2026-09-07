@@ -86,7 +86,7 @@ stops before starting spotDL.
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`, by name or code; default `English` |
-| `--max-attempts <N>` | Network attempts per line; default `3`, minimum `1` |
+| `--max-attempts <N>` | Network and audio-search attempts per line; default `3`, minimum `1` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 | `-h, --help` | Print download help |
 | `-V, --version` | Print the application version |
@@ -123,6 +123,45 @@ preserved in `output.txt` only if that fallback also fails. Because the
 fallback may select a live or user upload, an exact-source pair is still the
 strongest option: its YouTube URL pins the recording.
 
+### When YouTube Music will not answer at all
+
+Not finding a match and not being able to ask are different failures, and they
+get different fallbacks. spotDL reaches YouTube Music through the ytmusicapi
+package, which decodes a reply before it looks at the status code, so a block
+page or an interstitial served in place of results arrives as
+`JSONDecodeError: Expecting value: line 1 column 1 (char 0)` rather than as an
+empty result list. spotDL prints that per song and still **exits successfully**,
+so the exit status alone would call a run that downloaded nothing a success.
+The report lines it prints with `--print-errors` are read instead:
+
+```text
+https://open.spotify.com/track/7kg7gCtbQF6zPk0dKpsWTY - JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+```
+
+A line whose audio search was refused this way is retried on the same search up
+to `--max-attempts`, with the same exponential backoff ordinary network
+failures use. If YouTube Music is still not answering, the line is searched
+again with:
+
+```text
+--audio youtube
+```
+
+which is spotDL's yt-dlp YouTube search and does not go through the YouTube
+Music API at all. Dropping `--only-verified-results` is not tried on the way:
+both YouTube Music modes ask the same API, so verification is not what is
+failing, and nothing yt-dlp returns is marked verified anyway — the flag would
+discard every result it found. This fallback trades the same protection the
+unverified one does, and it says so while it runs.
+
+The block behind this is normally per address rather than per track, so the
+batch is not stopped: every remaining line retries and falls back on its own
+account, and only the lines that end with no audio reach `output.txt`. A
+`JSONDecodeError` raised while reading Spotify **metadata** is a different
+failure — it escapes spotDL as a traceback rather than a per-song report line,
+no audio search was ever reached, and changing the audio provider would not
+help — so it is reported as an ordinary failure instead.
+
 Those four options are fixed and are not configurable:
 
 | Option | Effect |
@@ -135,7 +174,8 @@ Those four options are fixed and are not configurable:
 For Spotify-only lines, `--audio youtube-music` is fixed as well, and the first
 attempt adds `--only-verified-results`. Verification makes automatic matching
 safer, but the fallback deliberately trades that protection for a better
-chance of finding audio. The only absolute choice is an exact-source pair.
+chance of finding audio, and `--audio youtube` gives up YouTube Music itself
+when its API will not answer. The only absolute choice is an exact-source pair.
 
 The command also passes `--print-errors`, `--max-retries 0` (retries are
 handled here instead), and spotDL's output template:
@@ -458,7 +498,9 @@ straight back to `download`. The detailed failure report is written only when
 at least one attempted line fails or causes the batch to stop.
 
 Ordinary network/service failures use exponential backoff up to
-`--max-attempts`. A short Spotify `Retry-After` delay is respected once.
+`--max-attempts`, and so does a YouTube Music search that answers with
+something other than results before the line falls back to `--audio youtube`.
+A short Spotify `Retry-After` delay is respected once.
 Application quota errors, repeated rate limits, or delays above
 `--max-rate-limit-wait` stop the batch and preserve the current and remaining
 lines rather than rotating tokens or sleeping for a long time.

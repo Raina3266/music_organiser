@@ -108,9 +108,10 @@ metadata whitelist, lyric handling, and the Spotify token modes.
 
 For a bare Spotify link, automatic audio matching tries verified YouTube Music
 results first. If none is found, it retries once without the verified-result
-restriction; this fallback may select a live or user upload. An exact-source
-pair still provides the strongest guarantee because it pins the YouTube
-recording directly.
+restriction; this fallback may select a live or user upload. If YouTube Music
+will not answer spotDL's search at all, the line is retried on spotDL's plain
+YouTube search instead. An exact-source pair still provides the strongest
+guarantee because it pins the YouTube recording directly.
 
 | Option | Meaning |
 |---|---|
@@ -126,7 +127,7 @@ recording directly.
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |
 | `--language <LANGUAGE>` | Fallback language for `TLAN`; default `English` |
-| `--max-attempts <N>` | Network attempts per line; default `3` |
+| `--max-attempts <N>` | Network and audio-search attempts per line; default `3` |
 | `--max-rate-limit-wait <SECS>` | Longest accepted Retry-After delay; default `300` |
 
 `SPOTDL_PROGRAM` chooses a spotDL executable without repeating `--spotdl`.

@@ -13,6 +13,32 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 `load_config`, or clear the official-API settings named in the error. Use
 `--official-api` only when that mode is intentional.
 
+## `JSONDecodeError: Expecting value: line 1 column 1 (char 0)`
+
+YouTube Music served spotDL's search a page instead of results. spotDL reaches
+it through ytmusicapi, which decodes the reply before checking the status code,
+so a block, a rate limit, or a consent interstitial surfaces as a JSON error.
+It is not a spotDL bug and no Spotify token affects it.
+
+The run handles it on its own: the line is retried up to `--max-attempts` and
+then searched again with `--audio youtube`, spotDL's yt-dlp search, which does
+not use the YouTube Music API. The batch is not stopped, so only the lines that
+end with no audio at all reach `output.txt`.
+
+If whole runs still come back empty, YouTube Music is refusing your address
+rather than one track. Wait it out or move to another network. To take the
+search out of the run altogether, pin the audio: an exact-source
+`YOUTUBE_MUSIC_URL|SPOTIFY_TRACK_URL` pair is downloaded without any audio
+search. [`resolve`](resolve.md) writes those pairs through Odesli, which does
+not touch the YouTube Music API — though it now needs an Odesli key.
+[`search-ytm-url`](search-ytm-url.md) finds the same links, but it searches
+through ytmusicapi as well, so a block that stops a download stops it too.
+
+One kind of line cannot fall back at all. A bare **YouTube Music link** has its
+metadata read through that same API whatever `--audio` says, so changing the
+audio provider does not help it. Pair those links with their Spotify track, or
+download them once YouTube Music answers again.
+
 ## `cannot import ytmusicapi`
 
 `search-ytm-url` searches through the ytmusicapi Python package. Install it into
