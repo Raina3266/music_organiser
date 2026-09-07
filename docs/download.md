@@ -245,7 +245,10 @@ way round it is for a given video.
 
 `--yt-dlp-args` is the general escape hatch, for whatever yt-dlp needs on the
 day. Neither is interpreted here — the string is passed straight through, so
-yt-dlp's own documentation is the reference for it.
+yt-dlp's own documentation is the reference for it. It reaches spotDL as a
+single `--yt-dlp-args=...` argument, because these values begin with a dash and
+spotDL's parser would otherwise read one as the next option rather than as this
+one's value.
 
 Worth ruling out first, since neither option helps with them: an outdated
 yt-dlp, which YouTube breaks regularly, and a missing Deno, which spotDL says

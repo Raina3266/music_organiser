@@ -307,7 +307,13 @@ fn download_command(
         command.arg("--cookie-file").arg(path);
     }
     if let Some(arguments) = yt_dlp.extra_arguments {
-        command.arg("--yt-dlp-args").arg(arguments);
+        // Written as one `--option=value` argument rather than two. These are
+        // yt-dlp options, so the value all but always begins with a dash, and
+        // spotDL's argument parser reads a separate word beginning with a dash
+        // as the next option rather than as this one's value. Joining them
+        // leaves no such word: everything after the first `=` is the value,
+        // its own `=` signs included.
+        command.arg(format!("--yt-dlp-args={arguments}"));
     }
     command
         .args(FIXED_ARGUMENTS)
@@ -857,13 +863,39 @@ mod tests {
             .expect("the cookie file is passed when one was given");
         assert_eq!(args[cookies + 1], "/home/me/cookies.txt");
 
-        let extra = args
-            .iter()
-            .position(|argument| argument == "--yt-dlp-args")
-            .expect("extra yt-dlp options are passed when they were given");
-        assert_eq!(
-            args[extra + 1],
-            "--extractor-args youtube:player_client=web"
+        // Joined into one argument: spotDL parses these with Python's argparse,
+        // which refuses a separate value beginning with a dash, and a yt-dlp
+        // option always begins with one. The value keeps its own `=` intact.
+        assert!(
+            args.iter()
+                .any(|argument| argument
+                    == "--yt-dlp-args=--extractor-args youtube:player_client=web"),
+            "the value is joined to its option, dashes and all: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_yt_dlp_flag_is_joined_to_its_option_too() {
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            PAIR,
+            AudioSearch::Pinned,
+            false,
+            None,
+            YtDlpOptions {
+                cookie_file: None,
+                extra_arguments: Some("--ignore-no-formats-error"),
+            },
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--yt-dlp-args=--ignore-no-formats-error"),
+            "{args:?}"
         );
     }
 
@@ -871,7 +903,11 @@ mod tests {
     fn a_run_that_asks_for_neither_passes_neither() {
         let args = arguments(false, None);
         assert!(!args.iter().any(|argument| argument == "--cookie-file"));
-        assert!(!args.iter().any(|argument| argument == "--yt-dlp-args"));
+        assert!(
+            !args
+                .iter()
+                .any(|argument| argument.starts_with("--yt-dlp-args"))
+        );
     }
 
     #[test]
