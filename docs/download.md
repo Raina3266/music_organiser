@@ -200,10 +200,20 @@ https://open.spotify.com/track/... - AudioProviderError: ERROR: [youtube] ...: R
 
 The search worked — the message names the video it picked. yt-dlp then could
 not get an audio stream out of it, which usually means YouTube answered its
-player request the way it answers a request it does not trust. No audio
-provider fixes that, because every one of them ends at the same yt-dlp.
+player request the way it answers a request it does not trust.
 
-Two options exist for it, and both are handed to spotDL exactly as written:
+The line is not given up on there. Every attempt searches afresh, so simply
+asking again often lands on a different recording, and the same recording is
+not always refused twice: the line is retried up to `--max-attempts`, and then
+the search is **widened** a rung at a time — verified YouTube Music results, to
+unverified ones, to plain YouTube — each rung offering a wider field to find a
+recording YouTube will actually serve. A pinned input is never widened, because
+it asked for one exact recording and quietly fetching a different one would be
+a different song rather than a fallback.
+
+Widening only changes which recording is tried. If YouTube is refusing *this
+machine* rather than *that video*, every rung ends the same way, and the fix is
+not a provider:
 
 ```bash
 music-tag-transfer download links.txt --cookie-file ~/youtube-cookies.txt

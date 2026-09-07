@@ -106,6 +106,19 @@ pub fn run(mut config: Config) -> Result<i32, String> {
         }
     }
 
+    // Named at startup because a run that fails on yt-dlp looks identical
+    // whether cookies were asked for or not, and the first question then is
+    // always whether they reached spotDL at all.
+    match config.cookie_file.as_deref() {
+        Some(path) => println!("Cookies: yt-dlp will use {}.", path.display()),
+        None => println!(
+            "Cookies: none; yt-dlp downloads anonymously. Pass --cookie-file if YouTube refuses the audio."
+        ),
+    }
+    if let Some(arguments) = config.yt_dlp_args.as_deref() {
+        println!("Extra yt-dlp options: {arguments}");
+    }
+
     let mut itunes = if config.no_copyright {
         println!("Copyright lookup: disabled with --no-copyright.");
         None
@@ -571,6 +584,7 @@ fn download_entry(
 ) -> Result<EntryOutcome, String> {
     let mut network_attempt = 1u32;
     let mut search_attempt = 1u32;
+    let mut download_attempt = 1u32;
     let mut token_replacements = 0u32;
     let mut waited_for_rate_limit = false;
     let mut audio_search = if entry.source.searches_for_audio() {
@@ -694,6 +708,38 @@ fn download_entry(
                 audio_search = relaxed;
                 search_attempt = 1;
                 network_attempt = 1;
+                download_attempt = 1;
+            }
+            Classification::AudioUndownloadable => {
+                // The search worked and YouTube refused what it named. Asking
+                // again is worth doing on its own: each attempt searches
+                // afresh, so a retry can land on a different recording, and
+                // the same recording is not always refused twice.
+                let reported = "spotDL found a recording but yt-dlp could not download it";
+                if download_attempt < config.max_attempts {
+                    let delay = 1u64 << download_attempt.min(5);
+                    download_attempt += 1;
+                    eprintln!(
+                        "{reported}; waiting {delay} seconds before retry {download_attempt}/{}...",
+                        config.max_attempts
+                    );
+                    thread::sleep(Duration::from_secs(delay));
+                    continue;
+                }
+
+                let Some(widened) = audio_search.widened() else {
+                    return Ok(EntryOutcome::Failed(format!(
+                        "{reported}, on {download_attempt} attempt(s) of {}. \
+                         YouTube is refusing the audio rather than hiding it: check that yt-dlp is \
+                         current, and pass --cookie-file to stop the requests being anonymous.",
+                        audio_search.describe()
+                    )));
+                };
+                eprintln!("{reported}; widening the search to {}.", widened.describe());
+                audio_search = widened;
+                download_attempt = 1;
+                search_attempt = 1;
+                network_attempt = 1;
             }
             Classification::DenoRequired => {
                 let setup = "spotDL needs Deno for this YouTube download.";
@@ -755,6 +801,7 @@ fn download_entry(
                     audio_search = spotdl::AudioSearch::Unverified;
                     network_attempt = 1;
                     search_attempt = 1;
+                    download_attempt = 1;
                     continue;
                 }
                 return Ok(EntryOutcome::Failed(

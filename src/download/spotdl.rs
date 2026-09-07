@@ -48,6 +48,8 @@ pub(super) enum Classification {
     /// YouTube Music answered spotDL's search with something its API client
     /// could not read, so no candidate recording was ever considered.
     AudioSearchUnavailable,
+    /// The search named a recording and yt-dlp could not fetch audio from it.
+    AudioUndownloadable,
     DenoRequired,
     Network,
     NotFound,
@@ -92,6 +94,23 @@ impl AudioSearch {
                 Some(AudioSearch::PlainYouTube)
             }
             AudioSearch::PlainYouTube => None,
+        }
+    }
+
+    /// The next search to try when the recording this one found could not be
+    /// downloaded.
+    ///
+    /// Unlike a silent YouTube Music, the API answered perfectly well here —
+    /// what it named was refused by YouTube itself. Each rung offers a wider
+    /// field of recordings to pick a different one from, so verification goes
+    /// first and YouTube Music only after that. A pinned input is never
+    /// widened: it asked for one exact recording, and quietly fetching some
+    /// other one is not a fallback but a different song.
+    pub(super) fn widened(self) -> Option<Self> {
+        match self {
+            AudioSearch::Verified => Some(AudioSearch::Unverified),
+            AudioSearch::Unverified => Some(AudioSearch::PlainYouTube),
+            AudioSearch::Pinned | AudioSearch::PlainYouTube => None,
         }
     }
 
@@ -481,6 +500,16 @@ pub(super) fn classify(result: &ProcessResult) -> Classification {
         contains_any(&text, &["audioprovidererror", "yt-dlp download error"]);
     if has_deno_hint && has_youtube_download_failure {
         return Classification::DenoRequired;
+    }
+    // Checked after the Deno case, which is this same provider error with a
+    // cause spotDL names outright. Everything left is YouTube refusing to
+    // serve a recording the search had already found, so the answer is another
+    // recording rather than another search engine.
+    if song_errors
+        .iter()
+        .any(|class| class.eq_ignore_ascii_case("AudioProviderError"))
+    {
+        return Classification::AudioUndownloadable;
     }
     if contains_any(
         &text,
@@ -995,6 +1024,51 @@ mod tests {
         let output = "Downloaded \"Artist - Song\": https://music.youtube.com/watch?v=dQw4w9WgXcQ";
         assert!(super::song_error_classes(output).is_empty());
         assert_eq!(classify(&result(true, output)), Classification::Success);
+    }
+
+    #[test]
+    fn a_recording_that_will_not_download_is_not_a_search_failure() {
+        let output = "https://open.spotify.com/track/abc123 - AudioProviderError: YT-DLP download error - https://www.youtube.com/watch?v=XTjgRONsYLg";
+        assert_eq!(
+            classify(&result(true, output)),
+            Classification::AudioUndownloadable
+        );
+
+        let format = "https://open.spotify.com/track/abc123 - AudioProviderError: ERROR: [youtube] mcDLVzATOnY: Requested format is not available";
+        assert_eq!(
+            classify(&result(true, format)),
+            Classification::AudioUndownloadable
+        );
+    }
+
+    #[test]
+    fn a_missing_deno_still_wins_over_the_provider_error_it_arrives_as() {
+        // Deno is that same yt-dlp failure with a cause spotDL names, and it
+        // has a fix of its own, so widening the search must not swallow it.
+        let output = "Some YouTube downloads require Deno. Run spotdl --download-deno or install Deno system-wide.\n\
+             https://open.spotify.com/track/abc123 - AudioProviderError: YT-DLP download error - https://www.youtube.com/watch?v=abc";
+        assert_eq!(
+            classify(&result(false, output)),
+            Classification::DenoRequired
+        );
+    }
+
+    #[test]
+    fn an_undownloadable_recording_widens_the_field_a_rung_at_a_time() {
+        // The API answered here, so unlike a silent YouTube Music the
+        // unverified rung is worth having: it offers different recordings.
+        assert_eq!(
+            AudioSearch::Verified.widened(),
+            Some(AudioSearch::Unverified)
+        );
+        assert_eq!(
+            AudioSearch::Unverified.widened(),
+            Some(AudioSearch::PlainYouTube)
+        );
+        assert_eq!(AudioSearch::PlainYouTube.widened(), None);
+        // A pinned input asked for one recording; another one is a different
+        // song, not a fallback.
+        assert_eq!(AudioSearch::Pinned.widened(), None);
     }
 
     #[test]

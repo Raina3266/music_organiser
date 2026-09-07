@@ -50,8 +50,12 @@ for them was a startup check the fallback skips.
 
 The search found the song — the message names the YouTube video it picked — and
 yt-dlp then could not fetch audio from it. This is not the YouTube Music
-problem above and no audio provider works around it, because they all end at
-the same yt-dlp.
+problem above.
+
+The run retries the line and then widens the search, so a track refused on one
+recording can still succeed on another. Reaching the failure report means every
+rung was refused, which usually means YouTube is refusing this machine rather
+than those particular videos.
 
 Check these in order:
 
