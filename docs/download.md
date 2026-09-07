@@ -120,10 +120,12 @@ passes:
 
 That makes verified YouTube Music results the first choice for automatic audio
 matching. If there is no verified match, the program retries once with
-`--audio youtube-music` but without `--only-verified-results`. The line is
-preserved in `output.txt` only if that fallback also fails. Because the
-fallback may select a live or user upload, an exact-source pair is still the
-strongest option: its YouTube URL pins the recording.
+`--audio youtube-music` but without `--only-verified-results`. If that search
+also returns no match, it makes one final attempt with `--audio youtube`, which
+searches ordinary YouTube through yt-dlp and does not use ytmusicapi. The line
+is preserved in `output.txt` only if all three searches fail. Because either
+wider fallback may select a live or user upload, an exact-source pair is still
+the strongest option: its YouTube URL pins the recording.
 
 ### When YouTube Music will not answer at all
 
@@ -167,11 +169,13 @@ still not answering, the line is retried once more with:
 which is spotDL's yt-dlp provider. It does not go through the YouTube Music API
 at all, and naming it also skips that startup check, which spotDL only runs
 while the YouTube Music provider is loaded. Dropping `--only-verified-results`
-is not tried on the way: both YouTube Music modes ask the same API, so
-verification is not what is failing, and nothing yt-dlp returns is marked
-verified anyway — the flag would discard every result it found. This fallback
-trades the same protection the unverified one does, and it says so while it
-runs.
+is not tried *for that unreadable reply*: both YouTube Music modes ask the same
+API, so verification is not what is failing, and nothing yt-dlp returns is
+marked verified anyway — the flag would discard every result it found. If a
+later retry receives a valid but empty reply instead, the ordinary verified →
+unverified → plain YouTube ladder still continues rather than mistaking that
+change in error shape for the end of the fallback. This fallback trades the
+same protection the unverified one does, and it says so while it runs.
 
 **An exact-source pair falls back too**, even though it searches for nothing.
 Passing no `--audio` leaves spotDL on its default provider, which is YouTube

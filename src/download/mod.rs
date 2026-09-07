@@ -794,19 +794,28 @@ fn download_entry(
                 thread::sleep(Duration::from_secs(delay));
             }
             Classification::NotFound => {
-                if audio_search == spotdl::AudioSearch::Verified {
-                    eprintln!(
+                let Some(fallback) = audio_search.after_not_found() else {
+                    return Ok(EntryOutcome::Failed(
+                        "spotDL could not find downloadable audio for this input".into(),
+                    ));
+                };
+                match audio_search {
+                    spotdl::AudioSearch::Verified => eprintln!(
                         "No verified YouTube Music result was found; retrying without the verified-result restriction."
-                    );
-                    audio_search = spotdl::AudioSearch::Unverified;
-                    network_attempt = 1;
-                    search_attempt = 1;
-                    download_attempt = 1;
-                    continue;
+                    ),
+                    spotdl::AudioSearch::Unverified => eprintln!(
+                        "YouTube Music returned no result even without verification; retrying with {}.",
+                        fallback.describe()
+                    ),
+                    spotdl::AudioSearch::Pinned | spotdl::AudioSearch::PlainYouTube => {
+                        unreachable!("only searches with a fallback reach this branch")
+                    }
                 }
-                return Ok(EntryOutcome::Failed(
-                    "spotDL could not find downloadable audio for this input".into(),
-                ));
+                audio_search = fallback;
+                network_attempt = 1;
+                search_attempt = 1;
+                download_attempt = 1;
+                continue;
             }
             Classification::Failed => {
                 let status = result

@@ -29,6 +29,9 @@ The run handles it on its own: the line is retried up to `--max-attempts` and
 then retried once more with `--audio youtube`, spotDL's yt-dlp provider, which
 neither uses the YouTube Music API nor triggers that startup check. The batch is
 not stopped, so only the lines that end with no audio at all reach `output.txt`.
+If a retry changes from the JSON error to a valid “no results” response, the
+fallback still reaches plain YouTube after trying the unverified YouTube Music
+search; the different error shape does not end the line early.
 
 If whole runs still come back empty, YouTube Music is refusing your address
 rather than one track. Wait it out or move to another network. To take the

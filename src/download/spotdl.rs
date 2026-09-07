@@ -114,6 +114,17 @@ impl AudioSearch {
         }
     }
 
+    /// The next provider to try when this search returned no candidates.
+    ///
+    /// An empty verified search only proves that no official recording was
+    /// found, so the next attempt keeps YouTube Music and relaxes that filter.
+    /// An empty unverified search has exhausted YouTube Music altogether; the
+    /// remaining useful fallback is yt-dlp's plain YouTube search, which also
+    /// avoids ytmusicapi and its startup connectivity check.
+    pub(super) fn after_not_found(self) -> Option<Self> {
+        self.widened()
+    }
+
     /// How a run names this search to the person watching it.
     pub(super) fn describe(self) -> &'static str {
         match self {
@@ -727,6 +738,20 @@ mod tests {
     fn a_missing_audio_result_is_available_for_the_unverified_fallback() {
         let output = "LookupError: No results found for song: Artist - Song";
         assert_eq!(classify(&result(false, output)), Classification::NotFound);
+    }
+
+    #[test]
+    fn an_empty_youtube_music_search_eventually_leaves_youtube_music() {
+        assert_eq!(
+            AudioSearch::Verified.after_not_found(),
+            Some(AudioSearch::Unverified)
+        );
+        assert_eq!(
+            AudioSearch::Unverified.after_not_found(),
+            Some(AudioSearch::PlainYouTube)
+        );
+        assert_eq!(AudioSearch::PlainYouTube.after_not_found(), None);
+        assert_eq!(AudioSearch::Pinned.after_not_found(), None);
     }
 
     #[test]
