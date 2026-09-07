@@ -82,6 +82,8 @@ stops before starting spotDL.
 | `--token-file <FILE>` | Read a token from a file and automatically select official mode |
 | `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
+| `--cookie-file <FILE>` | Cookies for yt-dlp, when YouTube will not serve audio anonymously |
+| `--yt-dlp-args <ARGS>` | Extra yt-dlp options, passed through spotDL verbatim |
 | `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |
@@ -91,8 +93,8 @@ stops before starting spotDL.
 | `-h, --help` | Print download help |
 | `-V, --version` | Print the application version |
 
-`--output=...`, `--spotdl=...`, `--auth-token=...`, `--token-file=...`, and
-`--language=...` are also accepted. Use `--` before an input filename
+`--output=...`, `--spotdl=...`, `--auth-token=...`, `--token-file=...`,
+`--cookie-file=...`, `--yt-dlp-args=...`, and `--language=...` are also accepted. Use `--` before an input filename
 that starts with a hyphen.
 
 Set `SPOTDL_PROGRAM=/full/path/to/spotdl` to choose a spotDL executable
@@ -185,6 +187,42 @@ own account, and only the lines that end with no audio reach `output.txt`. A
 failure — its traceback names spotipy rather than ytmusicapi, no audio search
 was ever reached, and no provider would rescue it — so it is reported as an
 ordinary failure instead.
+
+### When YouTube will not serve the audio
+
+The two failures above are about *finding* a recording. Finding one and then
+not being able to fetch it is a third, and it looks like this:
+
+```text
+https://open.spotify.com/track/... - AudioProviderError: YT-DLP download error - https://www.youtube.com/watch?v=...
+https://open.spotify.com/track/... - AudioProviderError: ERROR: [youtube] ...: Requested format is not available
+```
+
+The search worked — the message names the video it picked. yt-dlp then could
+not get an audio stream out of it, which usually means YouTube answered its
+player request the way it answers a request it does not trust. No audio
+provider fixes that, because every one of them ends at the same yt-dlp.
+
+Two options exist for it, and both are handed to spotDL exactly as written:
+
+```bash
+music-tag-transfer download links.txt --cookie-file ~/youtube-cookies.txt
+music-tag-transfer download links.txt --yt-dlp-args '--extractor-args youtube:player_client=web'
+```
+
+`--cookie-file` is the usual answer. Export cookies for `youtube.com` from a
+browser you are signed into, in the Netscape format yt-dlp reads, and the
+requests stop being anonymous. **Treat that file as a password**: it carries a
+live session for the account it came from. Keep it outside the repository, give
+it owner-only permissions, and export a fresh one rather than sharing it.
+
+`--yt-dlp-args` is the general escape hatch, for whatever yt-dlp needs on the
+day. Neither is interpreted here — the string is passed straight through, so
+yt-dlp's own documentation is the reference for it.
+
+Worth ruling out first, since neither option helps with them: an outdated
+yt-dlp, which YouTube breaks regularly, and a missing Deno, which spotDL says
+so about in the same breath as the failure.
 
 Those four options are fixed and are not configurable:
 

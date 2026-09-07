@@ -239,7 +239,7 @@ fn parse_download(args: &[OsString]) -> Result<Command, String> {
         .collect::<Result<Vec<_>, _>>()?;
 
     match download_cli::parse_args(args)? {
-        DownloadCommand::Run(config) => Ok(Command::Download(config)),
+        DownloadCommand::Run(config) => Ok(Command::Download(*config)),
         DownloadCommand::Help => Ok(Command::DownloadHelp),
         DownloadCommand::Version => Ok(Command::Version),
     }

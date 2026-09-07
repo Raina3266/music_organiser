@@ -207,6 +207,18 @@ fn json_value<'a>(contents: &'a str, key: &str) -> Option<&'a str> {
     Some(after_colon.trim_start())
 }
 
+/// The yt-dlp options a run may hand to spotDL untouched.
+///
+/// YouTube serves audio to an anonymous request less and less reliably, and
+/// neither answer to that lives in this program: cookies come from a browser
+/// the person is already signed into, and the rest is whatever yt-dlp needs on
+/// the day. Both are passed straight through.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct YtDlpOptions<'a> {
+    pub(super) cookie_file: Option<&'a Path>,
+    pub(super) extra_arguments: Option<&'a str>,
+}
+
 pub(super) fn download(
     program: &str,
     output_dir: &Path,
@@ -214,6 +226,7 @@ pub(super) fn download(
     audio_search: AudioSearch,
     official_api: bool,
     token: Option<&str>,
+    yt_dlp: YtDlpOptions<'_>,
 ) -> Result<ProcessResult, String> {
     let mut command = download_command(
         program,
@@ -222,6 +235,7 @@ pub(super) fn download(
         audio_search,
         official_api,
         token,
+        yt_dlp,
     );
     run_relayed(&mut command, program)
 }
@@ -238,6 +252,7 @@ fn download_command(
     audio_search: AudioSearch,
     official_api: bool,
     token: Option<&str>,
+    yt_dlp: YtDlpOptions<'_>,
 ) -> Command {
     let mut command = Command::new(resolve_program(program));
     if official_api {
@@ -268,6 +283,12 @@ fn download_command(
         AudioSearch::PlainYouTube => {
             command.arg("--audio").arg("youtube");
         }
+    }
+    if let Some(path) = yt_dlp.cookie_file {
+        command.arg("--cookie-file").arg(path);
+    }
+    if let Some(arguments) = yt_dlp.extra_arguments {
+        command.arg("--yt-dlp-args").arg(arguments);
     }
     command
         .args(FIXED_ARGUMENTS)
@@ -617,7 +638,7 @@ pub(super) fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AudioSearch, Classification, ProcessResult, classify, download_command,
+        AudioSearch, Classification, ProcessResult, YtDlpOptions, classify, download_command,
         forcing_config_settings, parse_retry_after, parse_version,
     };
     use std::path::Path;
@@ -633,6 +654,7 @@ mod tests {
             AudioSearch::Pinned,
             official_api,
             token,
+            YtDlpOptions::default(),
         )
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -737,6 +759,7 @@ mod tests {
             AudioSearch::Verified,
             false,
             None,
+            YtDlpOptions::default(),
         )
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -763,6 +786,7 @@ mod tests {
             AudioSearch::Unverified,
             false,
             None,
+            YtDlpOptions::default(),
         )
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -778,6 +802,47 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "--only-verified-results")
         );
+    }
+
+    #[test]
+    fn yt_dlp_options_are_handed_to_spotdl_untouched() {
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            PAIR,
+            AudioSearch::Pinned,
+            false,
+            None,
+            YtDlpOptions {
+                cookie_file: Some(Path::new("/home/me/cookies.txt")),
+                extra_arguments: Some("--extractor-args youtube:player_client=web"),
+            },
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        let cookies = args
+            .iter()
+            .position(|argument| argument == "--cookie-file")
+            .expect("the cookie file is passed when one was given");
+        assert_eq!(args[cookies + 1], "/home/me/cookies.txt");
+
+        let extra = args
+            .iter()
+            .position(|argument| argument == "--yt-dlp-args")
+            .expect("extra yt-dlp options are passed when they were given");
+        assert_eq!(
+            args[extra + 1],
+            "--extractor-args youtube:player_client=web"
+        );
+    }
+
+    #[test]
+    fn a_run_that_asks_for_neither_passes_neither() {
+        let args = arguments(false, None);
+        assert!(!args.iter().any(|argument| argument == "--cookie-file"));
+        assert!(!args.iter().any(|argument| argument == "--yt-dlp-args"));
     }
 
     #[test]
@@ -806,6 +871,7 @@ mod tests {
             AudioSearch::Pinned,
             false,
             None,
+            YtDlpOptions::default(),
         );
         assert!(Path::new(command.get_program()).is_absolute());
     }
@@ -963,6 +1029,7 @@ mod tests {
             AudioSearch::Pinned,
             false,
             None,
+            YtDlpOptions::default(),
         )
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -983,6 +1050,7 @@ mod tests {
             AudioSearch::PlainYouTube,
             false,
             None,
+            YtDlpOptions::default(),
         )
         .get_args()
         .map(|argument| argument.to_string_lossy().into_owned())

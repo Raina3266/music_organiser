@@ -123,6 +123,8 @@ guarantee because it pins the YouTube recording directly.
 | `--token-file <FILE>` | Read a token from a file, selecting official mode |
 | `--non-interactive` | Never prompt for Spotify mode, Deno, or a token |
 | `--auto-download-deno` | Allow spotDL to install Deno when required |
+| `--cookie-file <FILE>` | Cookies for yt-dlp, when YouTube will not serve audio anonymously |
+| `--yt-dlp-args <ARGS>` | Extra yt-dlp options, passed through spotDL verbatim |
 | `--no-copyright` | Skip the iTunes, MusicBrainz, and Discogs copyright lookups |
 | `--no-language-lookup` | Skip the MusicBrainz language lookup and read the lyrics instead |
 | `--no-lyrics-lookup` | Skip LRCLIB and keep spotDL's own `.lrc` |

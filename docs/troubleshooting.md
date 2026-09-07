@@ -46,6 +46,42 @@ download them once YouTube Music answers again. Pairs themselves are fine: they
 fall back like any other line, because the only thing YouTube Music was doing
 for them was a startup check the fallback skips.
 
+## `AudioProviderError` / `Requested format is not available`
+
+The search found the song — the message names the YouTube video it picked — and
+yt-dlp then could not fetch audio from it. This is not the YouTube Music
+problem above and no audio provider works around it, because they all end at
+the same yt-dlp.
+
+Check these in order:
+
+1. **yt-dlp's version.** YouTube breaks older releases constantly. spotDL 4.5.2
+   asks for `yt-dlp>=2026.07.04`; a distribution package can lag well behind
+   that. On Nix, `ls -d /nix/store/*yt-dlp*` shows which one your spotDL
+   actually uses.
+2. **Deno.** spotDL prints `Some YouTube downloads require Deno` alongside the
+   failure when it is missing. No such line means Deno is fine.
+3. **Reproduce it outside this program**, on the video the message named:
+
+   ```bash
+   yt-dlp -F 'https://www.youtube.com/watch?v=VIDEO_ID'
+   ```
+
+   If that errors or lists no audio formats, nothing in this program is
+   involved.
+
+If yt-dlp is current and still refused, YouTube is treating the request as
+untrusted. Sign it in with cookies exported from a browser:
+
+```bash
+music-tag-transfer download links.txt --cookie-file ~/youtube-cookies.txt
+```
+
+Use the Netscape cookie format yt-dlp reads, and **protect the file as you
+would a password** — it carries a live session. `--yt-dlp-args` passes anything
+else yt-dlp needs, for example
+`--yt-dlp-args '--extractor-args youtube:player_client=web'`.
+
 ## `cannot import ytmusicapi`
 
 `search-ytm-url` searches through the ytmusicapi Python package. Install it into

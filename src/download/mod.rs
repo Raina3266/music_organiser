@@ -587,6 +587,10 @@ fn download_entry(
             audio_search,
             config.official_api,
             auth_token.as_deref(),
+            spotdl::YtDlpOptions {
+                cookie_file: config.cookie_file.as_deref(),
+                extra_arguments: config.yt_dlp_args.as_deref(),
+            },
         )?;
         match spotdl::classify(&result) {
             Classification::Success => return Ok(EntryOutcome::Completed),
@@ -915,6 +919,8 @@ mod tests {
             token_file: None,
             non_interactive: false,
             auto_download_deno: false,
+            cookie_file: None,
+            yt_dlp_args: None,
             no_copyright: false,
             no_language_lookup: false,
             no_lyrics_lookup: true,

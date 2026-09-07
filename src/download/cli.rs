@@ -18,6 +18,11 @@ pub struct Config {
     pub token_file: Option<PathBuf>,
     pub non_interactive: bool,
     pub auto_download_deno: bool,
+    /// Cookies handed to spotDL's yt-dlp, for a YouTube that will not serve
+    /// audio to an anonymous request.
+    pub cookie_file: Option<PathBuf>,
+    /// Extra yt-dlp options, passed through spotDL verbatim.
+    pub yt_dlp_args: Option<String>,
     /// Skip the iTunes copyright lookup.
     pub no_copyright: bool,
     /// Skip the MusicBrainz language lookup and read the lyrics instead.
@@ -31,7 +36,9 @@ pub struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParsedCommand {
-    Run(Config),
+    /// Boxed so that the parsed configuration, which is far larger than the
+    /// two flag variants, does not set the size of every returned command.
+    Run(Box<Config>),
     Help,
     Version,
 }
@@ -50,6 +57,8 @@ where
     let mut token_file = None;
     let mut non_interactive = false;
     let mut auto_download_deno = false;
+    let mut cookie_file = None;
+    let mut yt_dlp_args = None;
     let mut no_copyright = false;
     let mut no_language_lookup = false;
     let mut no_lyrics_lookup = false;
@@ -79,6 +88,10 @@ where
             "--token-file" => {
                 token_file = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
             }
+            "--cookie-file" => {
+                cookie_file = Some(PathBuf::from(next_value(&args, &mut index, argument)?));
+            }
+            "--yt-dlp-args" => yt_dlp_args = Some(next_value(&args, &mut index, argument)?),
             "--max-attempts" => {
                 max_attempts =
                     parse_positive_u32(&next_value(&args, &mut index, argument)?, argument)?;
@@ -108,6 +121,12 @@ where
             _ if argument.starts_with("--token-file=") => {
                 token_file = Some(PathBuf::from(&argument["--token-file=".len()..]));
             }
+            _ if argument.starts_with("--cookie-file=") => {
+                cookie_file = Some(PathBuf::from(&argument["--cookie-file=".len()..]));
+            }
+            _ if argument.starts_with("--yt-dlp-args=") => {
+                yt_dlp_args = Some(argument["--yt-dlp-args=".len()..].to_owned());
+            }
             _ if argument.starts_with("--language=") => {
                 language = argument["--language=".len()..].to_owned();
             }
@@ -132,9 +151,22 @@ where
     );
     let input = expand_tilde(&input, &home);
     let token_file = token_file.map(|path| expand_tilde(&path, &home));
+    let cookie_file = cookie_file.map(|path| expand_tilde(&path, &home));
 
     if spotdl.trim().is_empty() {
         return Err("--spotdl cannot be empty".into());
+    }
+    // A missing cookie file is reported now rather than as a download that
+    // quietly behaves as though none had been asked for.
+    if let Some(path) = cookie_file.as_deref()
+        && !path.is_file()
+    {
+        return Err(format!("--cookie-file {} is not a file", path.display()));
+    }
+    if let Some(arguments) = yt_dlp_args.as_deref()
+        && arguments.trim().is_empty()
+    {
+        return Err("--yt-dlp-args cannot be empty".into());
     }
     validate_token_options(
         official_api,
@@ -148,7 +180,7 @@ where
     let official_api = official_api || auth_token.is_some() || token_file.is_some();
     let language = validate_language(&language)?;
 
-    Ok(ParsedCommand::Run(Config {
+    Ok(ParsedCommand::Run(Box::new(Config {
         input,
         output,
         spotdl,
@@ -158,13 +190,15 @@ where
         token_file,
         non_interactive,
         auto_download_deno,
+        cookie_file,
+        yt_dlp_args,
         no_copyright,
         no_language_lookup,
         no_lyrics_lookup,
         language,
         max_attempts,
         max_rate_limit_wait,
-    }))
+    })))
 }
 
 /// Accept a language by English name or by ISO-639-2/639-3 code.
@@ -256,6 +290,9 @@ OPTIONS:
         --token-file <FILE>           Read a Spotify access token from a file
         --non-interactive             Never prompt for Spotify mode, Deno, or a token
         --auto-download-deno          Let spotDL install Deno if YouTube requires it
+        --cookie-file <FILE>          Cookies for yt-dlp, when YouTube will not serve
+                                      audio to an anonymous request
+        --yt-dlp-args <ARGS>          Extra yt-dlp options, passed through verbatim
         --no-copyright                Skip the iTunes, MusicBrainz and Discogs
                                       copyright lookups
         --no-language-lookup          Skip the MusicBrainz language lookup and read the
@@ -372,11 +409,78 @@ Blank lines and lines beginning with # are ignored.",
 
 #[cfg(test)]
 mod tests {
+
     use super::{
         ParsedCommand, parse_args, parse_positive_u32, set_input, validate_language,
         validate_token_options,
     };
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn yt_dlp_options_reach_the_config_in_either_spelling() {
+        let cookies = std::env::temp_dir().join("music-tag-transfer-cookie-test.txt");
+        std::fs::write(&cookies, "# Netscape HTTP Cookie File\n").expect("the fixture is writable");
+        let cookies = cookies.to_string_lossy().into_owned();
+
+        for arguments in [
+            vec![
+                "links.txt".to_owned(),
+                "--cookie-file".to_owned(),
+                cookies.clone(),
+                "--yt-dlp-args".to_owned(),
+                "--extractor-args youtube:player_client=web".to_owned(),
+            ],
+            vec![
+                "links.txt".to_owned(),
+                format!("--cookie-file={cookies}"),
+                "--yt-dlp-args=--extractor-args youtube:player_client=web".to_owned(),
+            ],
+        ] {
+            let ParsedCommand::Run(config) = parse_args(arguments).expect("both spellings parse")
+            else {
+                panic!("an input file always runs the download");
+            };
+            assert_eq!(
+                config.cookie_file.as_deref(),
+                Some(Path::new(&cookies)),
+                "the cookie file is kept as given"
+            );
+            assert_eq!(
+                config.yt_dlp_args.as_deref(),
+                Some("--extractor-args youtube:player_client=web"),
+                "yt-dlp options are passed through unparsed"
+            );
+        }
+
+        std::fs::remove_file(&cookies).ok();
+    }
+
+    #[test]
+    fn a_cookie_file_that_is_not_there_stops_before_downloading() {
+        // Otherwise the run behaves exactly as though no cookies were asked
+        // for, which is the failure the option exists to fix.
+        let missing = std::env::temp_dir().join("music-tag-transfer-no-such-cookie-file.txt");
+        std::fs::remove_file(&missing).ok();
+        let error = parse_args(vec![
+            "links.txt".to_owned(),
+            "--cookie-file".to_owned(),
+            missing.to_string_lossy().into_owned(),
+        ])
+        .expect_err("a missing cookie file is refused");
+        assert!(error.contains("--cookie-file"), "{error}");
+        assert!(error.contains("is not a file"), "{error}");
+    }
+
+    #[test]
+    fn no_yt_dlp_options_are_passed_unless_they_are_asked_for() {
+        let ParsedCommand::Run(config) =
+            parse_args(vec!["links.txt".to_owned()]).expect("a bare input file parses")
+        else {
+            panic!("an input file always runs the download");
+        };
+        assert_eq!(config.cookie_file, None);
+        assert_eq!(config.yt_dlp_args, None);
+    }
 
     #[test]
     fn positive_integer_rejects_zero() {
