@@ -213,18 +213,35 @@ a different song rather than a fallback.
 
 Widening only changes which recording is tried. If YouTube is refusing *this
 machine* rather than *that video*, every rung ends the same way, and the fix is
-not a provider:
+not a provider.
+
+One case is worth knowing because it hides the alternatives rather than running
+out of them. spotDL hands yt-dlp a logger that raises instead of logging, so
+when the plain YouTube provider searches — that search is yt-dlp's own
+`ytsearch10:` — a problem with **one** of the ten results aborts the whole
+search, nine good results included. Passing
+`--yt-dlp-args '--ignore-no-formats-error'` turns that entry into a skipped one
+instead. [Troubleshooting](troubleshooting.md) covers it, along with the rest
+of what to check.
+
+Both of these are handed to spotDL exactly as written:
 
 ```bash
 music-tag-transfer download links.txt --cookie-file ~/youtube-cookies.txt
 music-tag-transfer download links.txt --yt-dlp-args '--extractor-args youtube:player_client=web'
 ```
 
-`--cookie-file` is the usual answer. Export cookies for `youtube.com` from a
-browser you are signed into, in the Netscape format yt-dlp reads, and the
-requests stop being anonymous. **Treat that file as a password**: it carries a
-live session for the account it came from. Keep it outside the repository, give
-it owner-only permissions, and export a fresh one rather than sharing it.
+`--cookie-file` stops the requests being anonymous. Export cookies for
+`youtube.com` from a browser you are signed into, in the Netscape format yt-dlp
+reads. **Treat that file as a password**: it carries a live session for the
+account it came from. Keep it outside the repository, give it owner-only
+permissions, and export a fresh one rather than sharing it.
+
+Cookies are worth testing rather than assuming, in both directions: yt-dlp
+declines to use some player clients alongside them, and those may be the
+clients YouTube is currently serving, so they can cost as easily as they gain.
+[Troubleshooting](troubleshooting.md) has the two commands that settle which
+way round it is for a given video.
 
 `--yt-dlp-args` is the general escape hatch, for whatever yt-dlp needs on the
 day. Neither is interpreted here — the string is passed straight through, so

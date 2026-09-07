@@ -48,43 +48,76 @@ for them was a startup check the fallback skips.
 
 ## `AudioProviderError` / `Requested format is not available`
 
-The search found the song — the message names the YouTube video it picked — and
-yt-dlp then could not fetch audio from it. This is not the YouTube Music
-problem above.
+YouTube would not serve an audio format for a video. Which video, and at which
+step, depends on the provider — and the two are worth telling apart, because
+only one of them is really about the recording spotDL wanted:
 
-The run retries the line and then widens the search, so a track refused on one
-recording can still succeed on another. Reaching the failure report means every
-rung was refused, which usually means YouTube is refusing this machine rather
-than those particular videos.
+| Provider | Searches through | The failure is |
+|---|---|---|
+| `youtube-music` | ytmusicapi, no yt-dlp | the **download** of the recording it chose |
+| `youtube` | yt-dlp's own `ytsearch10:` | the **search** itself |
 
-Check these in order:
+The search case is the surprising one. spotDL hands yt-dlp a logger whose
+`error` method raises instead of logging, so a problem yt-dlp reports about
+**one** of the ten search results aborts the whole search — including the nine
+that were fine. One video nobody can download hides every alternative to it.
+
+That one has a direct fix. yt-dlp raises only when
+`ignore_no_formats_error` is unset, and spotDL's logger discards warnings, so
+setting it turns the fatal entry into a skipped one:
+
+```bash
+music-tag-transfer download links.txt --yt-dlp-args '--ignore-no-formats-error'
+```
+
+Worth trying whenever *some* of a run downloads and the rest does not: that
+pattern says YouTube is refusing particular videos rather than this machine,
+and skipping them lets the search reach one that works.
+
+For the download case, the run already retries the line and widens the search,
+so a track refused on one recording can still succeed on another. Reaching the
+failure report means every rung was refused.
+
+If whole runs fail, check these in order:
 
 1. **yt-dlp's version.** YouTube breaks older releases constantly. spotDL 4.5.2
-   asks for `yt-dlp>=2026.07.04`; a distribution package can lag well behind
-   that. On Nix, `ls -d /nix/store/*yt-dlp*` shows which one your spotDL
-   actually uses.
+   asks for `yt-dlp>=2026.07.04`. `ls -d /nix/store/*yt-dlp*` lists what a Nix
+   system has; the version in a failure traceback is the one actually loaded.
 2. **Deno.** spotDL prints `Some YouTube downloads require Deno` alongside the
    failure when it is missing. No such line means Deno is fine.
-3. **Reproduce it outside this program**, on the video the message named:
+3. **The real error.** `AudioProviderError: YT-DLP download error` carries no
+   diagnosis: spotDL sends the actual exception to `logger.debug` and re-raises
+   that placeholder, so it is invisible at the default log level. Ask spotDL
+   directly, with `--audio youtube` so its YouTube Music startup check cannot
+   crash the run first:
+
+   ```bash
+   spotdl --log-level DEBUG --audio youtube --format mp3 \
+     download 'https://open.spotify.com/track/TRACK_ID'
+   ```
+
+4. **Cookies, in both directions.** They can help, by making the requests
+   signed-in — and they can hurt, because yt-dlp will not use some player
+   clients alongside them, which may be the only clients YouTube is serving.
+   Compare the two on a video that failed:
 
    ```bash
    yt-dlp -F 'https://www.youtube.com/watch?v=VIDEO_ID'
+   yt-dlp --cookies ~/youtube-cookies.txt -F 'https://www.youtube.com/watch?v=VIDEO_ID'
    ```
 
-   If that errors or lists no audio formats, nothing in this program is
-   involved.
-
-If yt-dlp is current and still refused, YouTube is treating the request as
-untrusted. Sign it in with cookies exported from a browser:
+   Whichever lists audio formats is the one to run with. To use cookies, export
+   them for `youtube.com` in the Netscape format yt-dlp reads, and **protect
+   the file as you would a password** — it carries a live session. Exporting
+   from a private window and closing it without logging out keeps the copy
+   valid; a session you keep browsing in rotates the cookies out from under it.
 
 ```bash
 music-tag-transfer download links.txt --cookie-file ~/youtube-cookies.txt
 ```
 
-Use the Netscape cookie format yt-dlp reads, and **protect the file as you
-would a password** — it carries a live session. `--yt-dlp-args` passes anything
-else yt-dlp needs, for example
-`--yt-dlp-args '--extractor-args youtube:player_client=web'`.
+`--yt-dlp-args` passes anything else yt-dlp needs, uninterpreted — for example
+`--yt-dlp-args '--extractor-args youtube:player_client=tv'`.
 
 ## `cannot import ytmusicapi`
 
