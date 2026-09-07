@@ -130,37 +130,61 @@ get different fallbacks. spotDL reaches YouTube Music through the ytmusicapi
 package, which decodes a reply before it looks at the status code, so a block
 page or an interstitial served in place of results arrives as
 `JSONDecodeError: Expecting value: line 1 column 1 (char 0)` rather than as an
-empty result list. spotDL prints that per song and still **exits successfully**,
-so the exit status alone would call a run that downloaded nothing a success.
-The report lines it prints with `--print-errors` are read instead:
+empty result list.
+
+That refusal reaches spotDL from two places, and the exit status describes
+neither. A search made **for one song** is caught and reported on that song's
+`--print-errors` line, after which spotDL still exits successfully — so the
+exit status alone would call a run that downloaded nothing a success:
 
 ```text
 https://open.spotify.com/track/7kg7gCtbQF6zPk0dKpsWTY - JSONDecodeError: Expecting value: line 1 column 1 (char 0)
 ```
 
-A line whose audio search was refused this way is retried on the same search up
-to `--max-attempts`, with the same exponential backoff ordinary network
-failures use. If YouTube Music is still not answering, the line is searched
-again with:
+spotDL also runs a **YouTube Music connectivity check on startup**, before it
+wraps the work in a handler, so a refusal there escapes as a traceback and
+takes the process down with a non-zero status and no report line at all. Both
+are read, the second from the ytmusicapi frames in the traceback:
+
+```text
+site-packages/spotdl/console/entry_point.py:100 in entry_point
+  if not check_ytmusic_connection():
+...
+ytmusicapi/ytmusic.py:246 in _send_request
+  response_text: JsonDict = json.loads(response.text)
+```
+
+A line refused either way is retried unchanged up to `--max-attempts`, with the
+same exponential backoff ordinary network failures use. If YouTube Music is
+still not answering, the line is retried once more with:
 
 ```text
 --audio youtube
 ```
 
-which is spotDL's yt-dlp YouTube search and does not go through the YouTube
-Music API at all. Dropping `--only-verified-results` is not tried on the way:
-both YouTube Music modes ask the same API, so verification is not what is
-failing, and nothing yt-dlp returns is marked verified anyway — the flag would
-discard every result it found. This fallback trades the same protection the
-unverified one does, and it says so while it runs.
+which is spotDL's yt-dlp provider. It does not go through the YouTube Music API
+at all, and naming it also skips that startup check, which spotDL only runs
+while the YouTube Music provider is loaded. Dropping `--only-verified-results`
+is not tried on the way: both YouTube Music modes ask the same API, so
+verification is not what is failing, and nothing yt-dlp returns is marked
+verified anyway — the flag would discard every result it found. This fallback
+trades the same protection the unverified one does, and it says so while it
+runs.
 
-The block behind this is normally per address rather than per track, so the
-batch is not stopped: every remaining line retries and falls back on its own
-account, and only the lines that end with no audio reach `output.txt`. A
+**An exact-source pair falls back too**, even though it searches for nothing.
+Passing no `--audio` leaves spotDL on its default provider, which is YouTube
+Music, and loading it costs that startup check — so a pinned line is taken down
+by a block just as a searched one is. Naming plain YouTube cannot change what a
+pair downloads: its recording is already pinned, and the audio is fetched with
+yt-dlp either way.
+
+The block behind all of this is normally per address rather than per track, so
+the batch is not stopped: every remaining line retries and falls back on its
+own account, and only the lines that end with no audio reach `output.txt`. A
 `JSONDecodeError` raised while reading Spotify **metadata** is a different
-failure — it escapes spotDL as a traceback rather than a per-song report line,
-no audio search was ever reached, and changing the audio provider would not
-help — so it is reported as an ordinary failure instead.
+failure — its traceback names spotipy rather than ytmusicapi, no audio search
+was ever reached, and no provider would rescue it — so it is reported as an
+ordinary failure instead.
 
 Those four options are fixed and are not configurable:
 

@@ -15,15 +15,20 @@ Inspect `~/.config/spotdl/config.json` or `~/.spotdl/config.json`. Disable
 
 ## `JSONDecodeError: Expecting value: line 1 column 1 (char 0)`
 
-YouTube Music served spotDL's search a page instead of results. spotDL reaches
-it through ytmusicapi, which decodes the reply before checking the status code,
-so a block, a rate limit, or a consent interstitial surfaces as a JSON error.
-It is not a spotDL bug and no Spotify token affects it.
+YouTube Music served spotDL a page instead of results. spotDL reaches it
+through ytmusicapi, which decodes the reply before checking the status code, so
+a block, a rate limit, or a consent interstitial surfaces as a JSON error. It is
+not a spotDL bug and no Spotify token affects it.
+
+You may see it reported against one track, or as a traceback ending in
+`check_ytmusic_connection` — spotDL's startup connectivity check, which runs
+outside its own error handling and so takes the whole process down. Both mean
+the same thing and are handled the same way.
 
 The run handles it on its own: the line is retried up to `--max-attempts` and
-then searched again with `--audio youtube`, spotDL's yt-dlp search, which does
-not use the YouTube Music API. The batch is not stopped, so only the lines that
-end with no audio at all reach `output.txt`.
+then retried once more with `--audio youtube`, spotDL's yt-dlp provider, which
+neither uses the YouTube Music API nor triggers that startup check. The batch is
+not stopped, so only the lines that end with no audio at all reach `output.txt`.
 
 If whole runs still come back empty, YouTube Music is refusing your address
 rather than one track. Wait it out or move to another network. To take the
@@ -37,7 +42,9 @@ through ytmusicapi as well, so a block that stops a download stops it too.
 One kind of line cannot fall back at all. A bare **YouTube Music link** has its
 metadata read through that same API whatever `--audio` says, so changing the
 audio provider does not help it. Pair those links with their Spotify track, or
-download them once YouTube Music answers again.
+download them once YouTube Music answers again. Pairs themselves are fine: they
+fall back like any other line, because the only thing YouTube Music was doing
+for them was a startup check the fallback skips.
 
 ## `cannot import ytmusicapi`
 

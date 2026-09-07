@@ -71,17 +71,27 @@ pub(super) enum AudioSearch {
 }
 
 impl AudioSearch {
-    /// The search left when YouTube Music itself will not answer.
+    /// The provider left when YouTube Music itself will not answer.
     ///
     /// Both YouTube Music modes go through the same API, so dropping the
     /// verified-result restriction would only ask it the same question again
     /// and collect the same refusal: plain YouTube is the one search that does
-    /// not depend on it. A pinned input searched for nothing and so has
-    /// nothing to fall back to.
+    /// not depend on it.
+    ///
+    /// A pinned input falls back too, even though it searches for nothing.
+    /// Naming no provider leaves spotDL on its default, which is YouTube
+    /// Music, and spotDL runs a YouTube Music connectivity check on startup
+    /// whenever that provider is loaded — before it wraps the work in a
+    /// handler, so a refusal there takes the process down with it. Asking for
+    /// plain YouTube skips that check and cannot change what is downloaded:
+    /// the recording is already pinned, and the audio is fetched with yt-dlp
+    /// either way.
     pub(super) fn without_youtube_music(self) -> Option<Self> {
         match self {
-            AudioSearch::Verified | AudioSearch::Unverified => Some(AudioSearch::PlainYouTube),
-            AudioSearch::Pinned | AudioSearch::PlainYouTube => None,
+            AudioSearch::Pinned | AudioSearch::Verified | AudioSearch::Unverified => {
+                Some(AudioSearch::PlainYouTube)
+            }
+            AudioSearch::PlainYouTube => None,
         }
     }
 
@@ -91,7 +101,7 @@ impl AudioSearch {
             AudioSearch::Pinned => "the YouTube recording the input pinned",
             AudioSearch::Verified => "verified YouTube Music results",
             AudioSearch::Unverified => "unverified YouTube Music results",
-            AudioSearch::PlainYouTube => "spotDL's plain YouTube search",
+            AudioSearch::PlainYouTube => "spotDL's plain YouTube provider",
         }
     }
 }
@@ -379,18 +389,7 @@ pub(super) fn classify(result: &ProcessResult) -> Classification {
             ],
         );
 
-    // Read a failed audio search off the per-song error lines rather than off
-    // the whole output: spotDL reaches YouTube Music through ytmusicapi, which
-    // decodes a reply before it looks at the status code, so a page served in
-    // place of results surfaces as a JSON error. The same error raised while
-    // reading Spotify metadata escapes spotDL's download loop instead and is
-    // printed as a traceback, where relaxing the audio search would not help.
-    if song_errors.iter().any(|class| {
-        matches!(
-            class.to_ascii_lowercase().as_str(),
-            "jsondecodeerror" | "ytmusicservererror" | "ytmusicgatederror"
-        )
-    }) {
+    if youtube_music_would_not_answer(&text, &song_errors) {
         return Classification::AudioSearchUnavailable;
     }
     if text.contains("active premium subscription required for the owner of the app")
@@ -501,6 +500,53 @@ pub(super) fn classify(result: &ProcessResult) -> Classification {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+/// Whether the run failed because YouTube Music would not answer spotDL.
+///
+/// spotDL reaches YouTube Music through ytmusicapi, which decodes a reply
+/// before it looks at the status code, so a page served in place of results
+/// surfaces as a JSON error rather than as an HTTP one. It reaches spotDL from
+/// two places, and neither can be read from the exit status alone:
+///
+/// * a search made for one song, which spotDL catches and reports on that
+///   song's `--print-errors` line;
+/// * its startup connectivity check, which runs before spotDL wraps the work
+///   in a handler at all, so it escapes as a traceback and takes the whole
+///   process down.
+///
+/// The second is why the frames are read as well as the report lines. The same
+/// JSON error raised while reading Spotify **metadata** also arrives as a
+/// traceback, and no audio provider would rescue it, so a traceback counts
+/// only when its frames name ytmusicapi as the thing that could not be read.
+fn youtube_music_would_not_answer(text: &str, song_errors: &[&str]) -> bool {
+    let unreadable_reply = contains_any(
+        text,
+        &[
+            "jsondecodeerror",
+            "expecting value: line 1 column 1",
+            "ytmusicservererror",
+            "ytmusicgatederror",
+        ],
+    );
+    if song_errors.iter().any(|class| {
+        matches!(
+            class.to_ascii_lowercase().as_str(),
+            "jsondecodeerror" | "ytmusicservererror" | "ytmusicgatederror"
+        )
+    }) {
+        return true;
+    }
+
+    // A rich traceback boxes its frames and wraps long paths mid-word, so a
+    // marker is matched wherever it survives that intact rather than as a
+    // whole path. Each of these appears several times in the frames the
+    // startup check produces.
+    unreadable_reply
+        && contains_any(
+            text,
+            &["ytmusicapi", "check_ytmusic_connection", "ytmusic.py"],
+        )
 }
 
 /// The exception classes spotDL named on its `--print-errors` report lines.
@@ -836,12 +882,32 @@ mod tests {
     fn the_same_json_error_from_the_metadata_half_is_not_an_audio_search_failure() {
         // Reading Spotify metadata happens before the download loop, so its
         // failure escapes as a traceback rather than a per-song report line.
-        // No audio search was reached, so relaxing one would change nothing.
+        // No audio search was reached, so changing the provider would not help.
         let output = "Processing query: https://open.spotify.com/track/abc123\n\
              An error occurred\n\
              Traceback (most recent call last):\n\
+             site-packages/spotdl/types/song.py:84 in from_url\n\
+             site-packages/spotdl/utils/spotify.py:141 in _get\n\
              JSONDecodeError: Expecting value: line 1 column 1 (char 0)";
         assert_eq!(classify(&result(false, output)), Classification::Failed);
+    }
+
+    #[test]
+    fn the_startup_check_crashing_on_ytmusicapi_is_a_failed_audio_search() {
+        // spotDL runs its YouTube Music connectivity check before it wraps the
+        // work in a handler, so a refusal there escapes as a traceback and
+        // exits non-zero. Naming plain YouTube skips the check entirely, which
+        // is exactly the fallback this classification asks for.
+        let output = "Traceback (most recent call last):\n\
+             site-packages/spotdl/console/entry_point.py:100 in entry_point\n\
+             if not check_ytmusic_connection():\n\
+             site-packages/spotdl/providers/audio/ytmusic.py:73 in get_results\n\
+             python3.14-ytmusicapi-1.12.2/ytmusicapi/ytmusic.py:246 in _send_request\n\
+             JSONDecodeError: Expecting value: line 1 column 1 (char 0)";
+        assert_eq!(
+            classify(&result(false, output)),
+            Classification::AudioSearchUnavailable
+        );
     }
 
     #[test]
@@ -878,7 +944,33 @@ mod tests {
             Some(AudioSearch::PlainYouTube)
         );
         assert_eq!(AudioSearch::PlainYouTube.without_youtube_music(), None);
-        assert_eq!(AudioSearch::Pinned.without_youtube_music(), None);
+    }
+
+    #[test]
+    fn a_pinned_input_names_a_provider_only_to_escape_the_startup_check() {
+        // Nothing is searched for, but spotDL's default provider is YouTube
+        // Music and loading it costs a connectivity check that can take the
+        // process down.
+        assert_eq!(
+            AudioSearch::Pinned.without_youtube_music(),
+            Some(AudioSearch::PlainYouTube)
+        );
+
+        let pinned = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            PAIR,
+            AudioSearch::Pinned,
+            false,
+            None,
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+        assert!(
+            !pinned.iter().any(|argument| argument == "--audio"),
+            "a first attempt still leaves the provider to spotDL"
+        );
     }
 
     #[test]
