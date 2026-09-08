@@ -51,35 +51,37 @@ for them was a startup check the fallback skips.
 
 ## `AudioProviderError` / `Requested format is not available`
 
-YouTube would not serve an audio format for a video. Which video, and at which
-step, depends on the provider — and the two are worth telling apart, because
-only one of them is really about the recording spotDL wanted:
+YouTube would not serve an audio format for a video. Which provider chose it is
+worth telling apart:
 
-| Provider | Searches through | The failure is |
+| Provider | Candidate search | Selected recording |
 |---|---|---|
-| `youtube-music` | ytmusicapi, no yt-dlp | the **download** of the recording it chose |
-| `youtube` | yt-dlp's own `ytsearch10:` | the **search** itself |
+| `youtube-music` | ytmusicapi | downloaded through yt-dlp |
+| `youtube` | yt-dlp's `ytsearch10:` in flat mode | downloaded through yt-dlp |
 
-The search case is the surprising one. spotDL hands yt-dlp a logger whose
-`error` method raises instead of logging, so a problem yt-dlp reports about
-**one** of the ten search results aborts the whole search — including the nine
-that were fine. One video nobody can download hides every alternative to it.
+spotDL hands yt-dlp a logger whose `error` method raises instead of logging.
+Its plain YouTube search therefore used to fail while inspecting the first
+blocked or formatless candidate, before spotDL could score the other nine.
 
-That one has a direct fix. yt-dlp raises only when
-`ignore_no_formats_error` is unset, and spotDL's logger discards warnings, so
-setting it turns the fatal entry into a skipped one:
+The wrapper prevents that failure automatically. It adds `--flat-playlist`
+only when it falls back to the plain YouTube provider, which leaves the search
+entries flat until spotDL chooses the best match. yt-dlp then fully extracts
+and downloads that one selected URL. User-supplied `--yt-dlp-args` are kept
+after the automatic option, so this still works as expected:
 
 ```bash
-music-tag-transfer download links.txt --yt-dlp-args '--ignore-no-formats-error'
+music-tag-transfer download links.txt \
+  --yt-dlp-args '--extractor-args youtube:player_client=web'
 ```
 
-Worth trying whenever *some* of a run downloads and the rest does not: that
-pattern says YouTube is refusing particular videos rather than this machine,
-and skipping them lets the search reach one that works.
+Do not add `--ignore-no-formats-error` just to fix candidate search. spotDL
+reuses that option for the selected video's real download too, where hiding a
+missing audio format can merely postpone the failure until conversion.
 
-For the download case, the run already retries the line and widens the search,
-so a track refused on one recording can still succeed on another. Reaching the
-failure report means every rung was refused.
+The run already retries a selected recording failure and widens the search, so
+a track refused on one recording can still succeed on another. Reaching the
+failure report now means the chosen recordings themselves were refused, or
+YouTube rejected the search request before it returned any candidates.
 
 If whole runs fail, check these in order:
 

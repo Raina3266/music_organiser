@@ -122,10 +122,13 @@ That makes verified YouTube Music results the first choice for automatic audio
 matching. If there is no verified match, the program retries once with
 `--audio youtube-music` but without `--only-verified-results`. If that search
 also returns no match, it makes one final attempt with `--audio youtube`, which
-searches ordinary YouTube through yt-dlp and does not use ytmusicapi. The line
-is preserved in `output.txt` only if all three searches fail. Because either
-wider fallback may select a live or user upload, an exact-source pair is still
-the strongest option: its YouTube URL pins the recording.
+searches ordinary YouTube through yt-dlp and does not use ytmusicapi. That last
+search also gets `--flat-playlist`: yt-dlp reads the candidates' search
+metadata without trying to extract every candidate's formats, and fully
+extracts only the recording spotDL chooses. The line is preserved in
+`output.txt` only if all three searches fail. Because either wider fallback
+may select a live or user upload, an exact-source pair is still the strongest
+option: its YouTube URL pins the recording.
 
 ### When YouTube Music will not answer at all
 
@@ -219,14 +222,16 @@ Widening only changes which recording is tried. If YouTube is refusing *this
 machine* rather than *that video*, every rung ends the same way, and the fix is
 not a provider.
 
-One case is worth knowing because it hides the alternatives rather than running
-out of them. spotDL hands yt-dlp a logger that raises instead of logging, so
-when the plain YouTube provider searches — that search is yt-dlp's own
-`ytsearch10:` — a problem with **one** of the ten results aborts the whole
-search, nine good results included. Passing
-`--yt-dlp-args '--ignore-no-formats-error'` turns that entry into a skipped one
-instead. [Troubleshooting](troubleshooting.md) covers it, along with the rest
-of what to check.
+One case used to hide the alternatives rather than running out of them. spotDL
+hands yt-dlp a logger that raises instead of logging, and its plain YouTube
+provider searches through `ytsearch10:`. Fully extracting all ten candidates
+meant a format error from **one** candidate aborted the whole search, nine good
+results included. The wrapper now adds `--flat-playlist` only on that fallback,
+so candidate enumeration stays metadata-only and the chosen recording is
+extracted normally afterward. There is no need to add
+`--ignore-no-formats-error`; because spotDL reuses the same yt-dlp options for
+the actual download, that flag could also suppress a real failure on the video
+it selected. [Troubleshooting](troubleshooting.md) covers the remaining checks.
 
 Both of these are handed to spotDL exactly as written:
 

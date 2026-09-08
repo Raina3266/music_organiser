@@ -22,6 +22,10 @@ const FIXED_ARGUMENTS: &[&str] = &[
     "synced",
     "--generate-lrc",
 ];
+/// Keep yt-dlp's plain-YouTube search from extracting every candidate before
+/// spotDL has chosen one. A formatless or blocked candidate would otherwise
+/// make spotDL's raising logger abort the entire `ytsearch10:` result set.
+const FLAT_YOUTUBE_SEARCH_ARGUMENT: &str = "--flat-playlist";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ProcessResult {
@@ -317,7 +321,15 @@ fn download_command(
     if let Some(path) = yt_dlp.cookie_file {
         command.arg("--cookie-file").arg(path);
     }
-    if let Some(arguments) = yt_dlp.extra_arguments {
+    let yt_dlp_arguments = match (audio_search, yt_dlp.extra_arguments) {
+        (AudioSearch::PlainYouTube, Some(arguments)) => {
+            Some(format!("{FLAT_YOUTUBE_SEARCH_ARGUMENT} {arguments}"))
+        }
+        (AudioSearch::PlainYouTube, None) => Some(FLAT_YOUTUBE_SEARCH_ARGUMENT.to_owned()),
+        (_, Some(arguments)) => Some(arguments.to_owned()),
+        (_, None) => None,
+    };
+    if let Some(arguments) = yt_dlp_arguments {
         // Written as one `--option=value` argument rather than two. These are
         // yt-dlp options, so the value all but always begins with a dash, and
         // spotDL's argument parser reads a separate word beginning with a dash
@@ -1200,6 +1212,36 @@ mod tests {
             !args
                 .iter()
                 .any(|argument| argument == "--only-verified-results")
+        );
+        assert!(
+            args.iter()
+                .any(|argument| argument == "--yt-dlp-args=--flat-playlist"),
+            "plain YouTube enumerates candidates without extracting them: {args:?}"
+        );
+    }
+
+    #[test]
+    fn plain_youtube_keeps_user_yt_dlp_options_after_the_flat_search_default() {
+        let args = download_command(
+            "spotdl",
+            Path::new("downloads"),
+            "https://open.spotify.com/track/abc123",
+            AudioSearch::PlainYouTube,
+            false,
+            None,
+            YtDlpOptions {
+                cookie_file: None,
+                extra_arguments: Some("--extractor-args youtube:player_client=web"),
+            },
+        )
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+        assert!(
+            args.iter().any(|argument| argument
+                == "--yt-dlp-args=--flat-playlist --extractor-args youtube:player_client=web"),
+            "the safe search default and the caller's options share one spotDL value: {args:?}"
         );
     }
 
